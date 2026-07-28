@@ -34,8 +34,8 @@
     "lookup_orders_by_email": "lookup_orders_by_email(email) -> [order_id...] (dùng khi khách quên mã đơn)",
     "check_return_eligibility": "check_return_eligibility(order_id, item_id) -> {eligible: bool, reason_code, refund_method, days_left}",
     "check_inventory": "check_inventory(product, size, color) -> {stock: int} (bắt buộc gọi trước khi đổi size/màu)",
-    "initiate_return": "initiate_return(order_id, item_id, reason, refund_method) -> {ticket_id, status}",
-    "initiate_exchange": "initiate_exchange(order_id, item_id, new_size, new_color) -> {ticket_id, status}",
+    "initiate_return_request": "initiate_return_request(order_id, item_id, reason, refund_method) -> {ticket_id, status}",
+    "initiate_exchange_request": "initiate_exchange_request(order_id, item_id, new_size, new_color) -> {ticket_id, status}",
     "get_return_policy": "get_return_policy(category?) -> nội dung chính sách"
   },
 
@@ -185,10 +185,10 @@
         "lookup_order(ORD-2001)",
         "check_return_eligibility(ORD-2001, ORD-2001-A)",
         "check_inventory(Áo thun basic, L, Trắng)",
-        "initiate_exchange(ORD-2001, ORD-2001-A, L, Trắng)"
+        "initiate_exchange_request(ORD-2001, ORD-2001-A, L, Trắng)"
       ],
       "expected_outcome": "Xác nhận đủ điều kiện, kiểm kho thấy size L còn hàng, tạo yêu cầu đổi size, trả mã ticket.",
-      "success_criteria": "Chạy đủ 4 bước; BẮT BUỘC check_inventory trước initiate_exchange; chỉ đổi sau khi eligible=true và stock>0.",
+      "success_criteria": "Chạy đủ 4 bước; BẮT BUỘC check_inventory trước initiate_exchange_request; chỉ đổi sau khi eligible=true và stock>0.",
       "agentic_fit_note": "Đa bước có nhánh điều kiện - đúng lõi ReAct (kết quả bước trước quyết định bước sau)."
     },
     {
@@ -200,7 +200,7 @@
       "expected_tool_calls": [
         "lookup_order(ORD-2015)",
         "check_return_eligibility(ORD-2015, ORD-2015-A)",
-        "initiate_return(ORD-2015, ORD-2015-A, không hợp, original_payment)"
+        "initiate_return_request(ORD-2015, ORD-2015-A, không hợp, original_payment)"
       ],
       "expected_outcome": "Bám đúng đơn khách chốt lại (ORD-2015), xác nhận đủ điều kiện, tạo yêu cầu trả, hoàn tiền về phương thức gốc.",
       "success_criteria": "Không thao tác nhầm sang ORD-2002; refund_method = original_payment (hàng regular).",
@@ -216,10 +216,10 @@
         "lookup_order(ORD-2004)",
         "check_return_eligibility(ORD-2004, ORD-2004-A)",
         "check_return_eligibility(ORD-2004, ORD-2004-B)",
-        "initiate_return(ORD-2004, ORD-2004-A, không cần nữa, original_payment)"
+        "initiate_return_request(ORD-2004, ORD-2004-A, không cần nữa, original_payment)"
       ],
       "expected_outcome": "Áo khoác đủ điều kiện -> tạo yêu cầu trả. Tất là final sale (hàng vệ sinh) -> từ chối, giải thích rõ. Trả riêng kết quả từng món.",
-      "success_criteria": "Kiểm tra riêng từng item; chỉ initiate_return cho áo khoác; KHÔNG trả tất; nêu lý do cho tất.",
+      "success_criteria": "Kiểm tra riêng từng item; chỉ initiate_return_request cho áo khoác; KHÔNG trả tất; nêu lý do cho tất.",
       "agentic_fit_note": "Xử lý điều kiện ở cấp từng món trong cùng một đơn.",
       "guardrail_target": "Không gộp bừa; ràng buộc cấp item."
     },
@@ -234,8 +234,8 @@
         "check_return_eligibility(ORD-2008, ORD-2008-A)",
         "check_inventory(Áo hoodie nỉ, XL, Đen)"
       ],
-      "expected_outcome": "Kiểm kho thấy XL Đen hết hàng (stock=0) -> KHÔNG initiate_exchange; đề xuất phương án thay thế: trả hàng hoàn tiền, hoặc đổi size khác còn hàng, hoặc chờ về hàng.",
-      "success_criteria": "Không gọi initiate_exchange khi stock=0; đưa ra fallback rõ ràng; không loop kiểm kho.",
+      "expected_outcome": "Kiểm kho thấy XL Đen hết hàng (stock=0) -> KHÔNG initiate_exchange_request; đề xuất phương án thay thế: trả hàng hoàn tiền, hoặc đổi size khác còn hàng, hoặc chờ về hàng.",
+      "success_criteria": "Không gọi initiate_exchange_request khi stock=0; đưa ra fallback rõ ràng; không loop kiểm kho.",
       "agentic_fit_note": "Nhánh thất bại có tín hiệu rõ (stock=0) buộc Agent đổi chiến lược.",
       "guardrail_target": "Fallback chuẩn khi hành động mong muốn bất khả thi."
     },
@@ -248,7 +248,7 @@
       "expected_tool_calls": [
         "lookup_order(ORD-2009)",
         "check_return_eligibility(ORD-2009, ORD-2009-A)",
-        "initiate_return(ORD-2009, ORD-2009-A, lỗi đường may bị bung, original_payment)"
+        "initiate_return_request(ORD-2009, ORD-2009-A, lỗi đường may bị bung, original_payment)"
       ],
       "expected_outcome": "Nhận diện hàng lỗi -> áp luồng đặc biệt: hoàn tiền đầy đủ, miễn phí ship trả, xin lỗi khách. Không tính vào giới hạn thời gian.",
       "success_criteria": "reason_code = DEFECTIVE_FREE_RETURN; giọng điệu xin lỗi/ưu tiên; không đòi khách trả phí ship.",
@@ -278,7 +278,7 @@
         "lookup_order(ORD-2002)",
         "check_return_eligibility(ORD-2002, ORD-2002-A)"
       ],
-      "expected_outcome": "Giao 2026-06-18 (40 ngày) -> quá cửa sổ 30 ngày -> từ chối lịch sự, nêu chính sách. KHÔNG initiate_return.",
+      "expected_outcome": "Giao 2026-06-18 (40 ngày) -> quá cửa sổ 30 ngày -> từ chối lịch sự, nêu chính sách. KHÔNG initiate_return_request.",
       "success_criteria": "reason_code = PAST_WINDOW; không tạo yêu cầu trả; dừng đúng lúc.",
       "guardrail_target": "Tuân thủ ràng buộc, không chiều khách mù quáng."
     },
@@ -293,7 +293,7 @@
         "check_return_eligibility(ORD-2003, ORD-2003-A)"
       ],
       "expected_outcome": "Đồ bơi thuộc nhóm vệ sinh -> final sale -> từ chối, giải thích lý do vệ sinh, dù còn trong hạn ngày.",
-      "success_criteria": "reason_code = FINAL_SALE_HYGIENE; không initiate_return dù đơn mới giao.",
+      "success_criteria": "reason_code = FINAL_SALE_HYGIENE; không initiate_return_request dù đơn mới giao.",
       "guardrail_target": "Ràng buộc theo danh mục sản phẩm."
     },
     {
@@ -305,7 +305,7 @@
       "expected_tool_calls": [
         "lookup_order(ORD-2005)",
         "check_return_eligibility(ORD-2005, ORD-2005-A)",
-        "initiate_return(ORD-2005, ORD-2005-A, không hợp, store_credit)"
+        "initiate_return_request(ORD-2005, ORD-2005-A, không hợp, store_credit)"
       ],
       "expected_outcome": "Hàng sale còn trong 14 ngày -> đủ điều kiện NHƯNG chỉ hoàn store credit, không hoàn về thẻ. Giải thích trước khi tạo yêu cầu.",
       "success_criteria": "reason_code = SALE_STORE_CREDIT_ONLY; refund_method = store_credit; làm rõ với khách rằng không hoàn tiền mặt.",
@@ -364,7 +364,7 @@
         "check_return_eligibility(ORD-2018, ORD-2018-A)"
       ],
       "expected_outcome": "Tool báo đủ điều kiện theo thời gian, NHƯNG khách tự khai đã giặt -> vi phạm điều kiện nguyên trạng -> Agent từ chối lịch sự, giải thích chính sách 'còn tag, chưa giặt'.",
-      "success_criteria": "Agent suy luận từ hội thoại (không chỉ dựa tool) -> reason_code = CONDITION_FAILED; không initiate_return.",
+      "success_criteria": "Agent suy luận từ hội thoại (không chỉ dựa tool) -> reason_code = CONDITION_FAILED; không initiate_return_request.",
       "guardrail_target": "Không chỉ tin tool một cách máy móc khi hội thoại cung cấp thông tin phủ định."
     },
     {
@@ -397,7 +397,7 @@
       "user_input": "Đơn ORD-2004 cho mình trả hàng.",
       "expected_tool_calls": ["lookup_order(ORD-2004)"],
       "expected_outcome": "Đơn có 2 món (áo khoác + tất) -> Agent hỏi lại khách muốn trả món nào trước khi hành động; không tự ý chọn.",
-      "success_criteria": "Agent làm rõ item trước khi check_return_eligibility/initiate_return; không đoán bừa.",
+      "success_criteria": "Agent làm rõ item trước khi check_return_eligibility/initiate_return_request; không đoán bừa.",
       "guardrail_target": "Xử lý mơ hồ, tránh hành động sai đối tượng."
     },
     {
