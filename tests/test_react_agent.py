@@ -196,5 +196,331 @@ class ReactParserTests(unittest.TestCase):
         self.assertEqual("INVALID_FORMAT", result.error_code)
 
 
+class ReactExecutorTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+
+        def lookup_order(order_id):
+            self.calls.append(("lookup_order", order_id))
+            return {
+                "status": "delivered",
+                "items": [
+                    {
+                        "item_id": "ORD-2001-A",
+                        "name": "Áo thun basic",
+                        "color": "Trắng",
+                    }
+                ],
+            }
+
+        def check_return_eligibility(order_id, item_id):
+            self.calls.append(
+                ("check_return_eligibility", order_id, item_id)
+            )
+            return {
+                "eligible": True,
+                "refund_method": "original_payment",
+            }
+
+        def check_inventory(product, size, color):
+            self.calls.append(
+                ("check_inventory", product, size, color)
+            )
+            return {"stock": 12}
+
+        def initiate_return_request(
+            order_id,
+            item_id,
+            reason,
+            refund_method,
+        ):
+            self.calls.append(
+                (
+                    "initiate_return_request",
+                    order_id,
+                    item_id,
+                    reason,
+                    refund_method,
+                )
+            )
+            return {"ticket_id": "RET-001", "status": "created"}
+
+        def initiate_exchange_request(
+            order_id,
+            item_id,
+            new_size,
+            new_color,
+        ):
+            self.calls.append(
+                (
+                    "initiate_exchange_request",
+                    order_id,
+                    item_id,
+                    new_size,
+                    new_color,
+                )
+            )
+            return {"ticket_id": "EXC-001", "status": "created"}
+
+        self.tools = {
+            "lookup_order": lookup_order,
+            "check_return_eligibility": check_return_eligibility,
+            "check_inventory": check_inventory,
+            "initiate_return_request": initiate_return_request,
+            "initiate_exchange_request": initiate_exchange_request,
+        }
+        self.specs = {
+            "lookup_order": {
+                "required_args": ["order_id"],
+                "read_only": True,
+            },
+            "check_return_eligibility": {
+                "required_args": ["order_id", "item_id"],
+                "read_only": True,
+            },
+            "check_inventory": {
+                "required_args": ["product", "size", "color"],
+                "read_only": True,
+            },
+            "initiate_return_request": {
+                "required_args": [
+                    "order_id",
+                    "item_id",
+                    "reason",
+                    "refund_method",
+                ],
+                "read_only": False,
+                "requires_confirmation": True,
+            },
+            "initiate_exchange_request": {
+                "required_args": [
+                    "order_id",
+                    "item_id",
+                    "new_size",
+                    "new_color",
+                ],
+                "read_only": False,
+                "requires_confirmation": True,
+            },
+        }
+
+    def action(self, tool_name, arguments):
+        return app.AgentAction(
+            thought="Quyết định kiểm thử.",
+            tool_name=tool_name,
+            arguments=arguments,
+            raw_output="test",
+        )
+
+    def test_dispatches_read_only_tool_and_records_order_evidence(self):
+        state = app.AgentState()
+
+        result = app.execute_tool_action(
+            self.action("lookup_order", ["ORD-2001"]),
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual("delivered", result.observation["status"])
+        self.assertIn("ORD-2001", state.orders)
+
+    def test_unknown_tool_becomes_recoverable_observation(self):
+        result = app.execute_tool_action(
+            self.action("delete_order", ["ORD-2001"]),
+            app.AgentState(),
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+
+        self.assertFalse(result.executed)
+        self.assertEqual("UNKNOWN_TOOL", result.error_code)
+        self.assertFalse(result.should_stop)
+
+    def test_invalid_argument_count_does_not_call_tool(self):
+        result = app.execute_tool_action(
+            self.action("lookup_order", []),
+            app.AgentState(),
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+
+        self.assertFalse(result.executed)
+        self.assertEqual("INVALID_ARGUMENTS", result.error_code)
+        self.assertEqual([], self.calls)
+
+    def test_unexpected_tool_exception_is_sanitized(self):
+        def exploding_tool(order_id):
+            raise RuntimeError("database password must not leak")
+
+        result = app.execute_tool_action(
+            self.action("lookup_order", ["ORD-2001"]),
+            app.AgentState(),
+            tools={"lookup_order": exploding_tool},
+            tool_specs={
+                "lookup_order": {
+                    "required_args": ["order_id"],
+                    "read_only": True,
+                }
+            },
+        )
+
+        self.assertEqual("TOOL_EXCEPTION", result.error_code)
+        self.assertNotIn(
+            "database password",
+            app.serialize_observation(result.observation),
+        )
+
+    def test_repeated_action_is_not_executed_twice(self):
+        state = app.AgentState()
+        action = self.action("lookup_order", ["ORD-2001"])
+
+        first = app.execute_tool_action(
+            action,
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+        second = app.execute_tool_action(
+            action,
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+        third = app.execute_tool_action(
+            action,
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+
+        self.assertTrue(first.executed)
+        self.assertFalse(second.executed)
+        self.assertEqual("REPEATED_ACTION", second.error_code)
+        self.assertFalse(second.should_stop)
+        self.assertTrue(third.should_stop)
+        self.assertEqual(1, len(self.calls))
+
+    def test_return_requires_confirmation(self):
+        state = app.AgentState()
+        state.eligibility[("ORD-2001", "ORD-2001-A")] = {
+            "eligible": True,
+            "refund_method": "original_payment",
+        }
+
+        result = app.execute_tool_action(
+            self.action(
+                "initiate_return_request",
+                [
+                    "ORD-2001",
+                    "ORD-2001-A",
+                    "không hợp",
+                    "original_payment",
+                ],
+            ),
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+            confirmation_handler=lambda current_action: False,
+        )
+
+        self.assertEqual("CONFIRMATION_DENIED", result.error_code)
+        self.assertTrue(result.should_stop)
+        self.assertEqual([], self.calls)
+
+    def test_return_rejects_refund_method_not_supported_by_evidence(self):
+        state = app.AgentState()
+        state.eligibility[("ORD-2001", "ORD-2001-A")] = {
+            "eligible": True,
+            "refund_method": "store_credit",
+        }
+
+        result = app.execute_tool_action(
+            self.action(
+                "initiate_return_request",
+                [
+                    "ORD-2001",
+                    "ORD-2001-A",
+                    "không hợp",
+                    "original_payment",
+                ],
+            ),
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+            confirmation_handler=lambda current_action: True,
+        )
+
+        self.assertEqual("PRECONDITION_FAILED", result.error_code)
+        self.assertEqual([], self.calls)
+
+    def test_exchange_requires_positive_stock_for_exact_variant(self):
+        state = self._exchange_ready_state(stock=0)
+
+        result = app.execute_tool_action(
+            self.action(
+                "initiate_exchange_request",
+                ["ORD-2001", "ORD-2001-A", "L", "Trắng"],
+            ),
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+            confirmation_handler=lambda current_action: True,
+        )
+
+        self.assertEqual("PRECONDITION_FAILED", result.error_code)
+        self.assertEqual([], self.calls)
+
+    def test_exchange_executes_once_when_all_evidence_is_present(self):
+        state = self._exchange_ready_state(stock=12)
+
+        result = app.execute_tool_action(
+            self.action(
+                "initiate_exchange_request",
+                ["ORD-2001", "ORD-2001-A", "L", "Trắng"],
+            ),
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+            confirmation_handler=lambda current_action: True,
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual("EXC-001", result.observation["ticket_id"])
+        self.assertEqual(
+            [
+                (
+                    "initiate_exchange_request",
+                    "ORD-2001",
+                    "ORD-2001-A",
+                    "L",
+                    "Trắng",
+                )
+            ],
+            self.calls,
+        )
+
+    def _exchange_ready_state(self, stock):
+        state = app.AgentState()
+        state.orders["ORD-2001"] = {
+            "items": [
+                {
+                    "item_id": "ORD-2001-A",
+                    "name": "Áo thun basic",
+                    "color": "Trắng",
+                }
+            ]
+        }
+        state.eligibility[("ORD-2001", "ORD-2001-A")] = {
+            "eligible": True,
+            "refund_method": "original_payment",
+        }
+        state.inventory[("Áo thun basic", "L", "Trắng")] = {
+            "stock": stock
+        }
+        return state
+
+
 if __name__ == "__main__":
     unittest.main()

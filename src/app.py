@@ -4,11 +4,12 @@ File chính ghép nối tất cả các thành phần: Tools + Prompts + Test Ca
 """
 
 import csv
+import inspect
 import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 from dotenv import load_dotenv
 
@@ -25,6 +26,7 @@ if sys.stdout.encoding != 'utf-8':
 # Import prompt của Role 3 và Multi-Provider Adapter
 from prompts import CHATBOT_BASELINE_PROMPT
 from providers import get_llm_provider
+from tools import AVAILABLE_TOOLS, TOOL_SPECS
 
 load_dotenv()
 
@@ -60,6 +62,29 @@ class ParsedAgentOutput:
     final_answer: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+
+
+@dataclass
+class AgentState:
+    """Evidence collected from read-only tools during one ReAct run."""
+
+    action_attempts: dict[str, int] = field(default_factory=dict)
+    orders: dict[str, dict[str, Any]] = field(default_factory=dict)
+    orders_by_email: dict[str, Any] = field(default_factory=dict)
+    eligibility: dict[tuple[str, str], dict[str, Any]] = field(
+        default_factory=dict
+    )
+    inventory: dict[tuple[str, str, str], dict[str, Any]] = field(
+        default_factory=dict
+    )
+
+
+@dataclass(frozen=True)
+class ToolExecutionResult:
+    observation: Any
+    executed: bool
+    error_code: Optional[str] = None
+    should_stop: bool = False
 
 
 def _parse_error(raw_output, code, message):
@@ -154,6 +179,218 @@ def parse_agent_output(model_output):
             arguments=arguments,
             raw_output=text,
         ),
+    )
+
+
+def serialize_observation(observation):
+    """Serialize a tool observation for the model and Markdown trace."""
+    return json.dumps(
+        observation,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _error_observation(code, message, **details):
+    observation = {"error": code, "message": message}
+    observation.update(details)
+    return observation
+
+
+def _action_fingerprint(action):
+    return json.dumps(
+        [action.tool_name, action.arguments],
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _find_order_item(state, order_id, item_id):
+    order = state.orders.get(str(order_id))
+    if not isinstance(order, dict):
+        return None
+    for item in order.get("items", []):
+        if str(item.get("item_id")) == str(item_id):
+            return item
+    return None
+
+
+def _write_precondition_error(action, state):
+    args = action.arguments
+
+    if action.tool_name == "initiate_return_request":
+        order_id, item_id, _reason, refund_method = args
+        evidence = state.eligibility.get(
+            (str(order_id), str(item_id))
+        )
+        if not evidence or evidence.get("eligible") is not True:
+            return _error_observation(
+                "PRECONDITION_FAILED",
+                "Phải xác nhận sản phẩm đủ điều kiện trước khi tạo yêu cầu trả.",
+            )
+        supported_refund = evidence.get("refund_method")
+        if supported_refund and str(refund_method) != str(supported_refund):
+            return _error_observation(
+                "PRECONDITION_FAILED",
+                "Phương thức hoàn tiền không khớp kết quả kiểm tra điều kiện.",
+                supported_refund_method=supported_refund,
+            )
+
+    if action.tool_name == "initiate_exchange_request":
+        order_id, item_id, new_size, new_color = args
+        evidence = state.eligibility.get(
+            (str(order_id), str(item_id))
+        )
+        if not evidence or evidence.get("eligible") is not True:
+            return _error_observation(
+                "PRECONDITION_FAILED",
+                "Phải xác nhận sản phẩm đủ điều kiện trước khi tạo yêu cầu đổi.",
+            )
+
+        item = _find_order_item(state, order_id, item_id)
+        if not item or not item.get("name"):
+            return _error_observation(
+                "PRECONDITION_FAILED",
+                "Phải tra cứu đơn hàng và sản phẩm trước khi tạo yêu cầu đổi.",
+            )
+
+        inventory = state.inventory.get(
+            (str(item["name"]), str(new_size), str(new_color))
+        )
+        if not inventory or int(inventory.get("stock", 0)) <= 0:
+            return _error_observation(
+                "PRECONDITION_FAILED",
+                "Biến thể muốn đổi chưa được xác nhận còn hàng.",
+            )
+
+    return None
+
+
+def _record_tool_evidence(action, observation, state):
+    if not isinstance(observation, dict) or "error" in observation:
+        return
+
+    args = action.arguments
+    if action.tool_name == "lookup_order" and args:
+        state.orders[str(args[0])] = observation
+    elif action.tool_name == "lookup_orders_by_email" and args:
+        state.orders_by_email[str(args[0])] = observation
+    elif action.tool_name == "check_return_eligibility":
+        state.eligibility[(str(args[0]), str(args[1]))] = observation
+    elif action.tool_name == "check_inventory":
+        state.inventory[
+            (str(args[0]), str(args[1]), str(args[2]))
+        ] = observation
+
+
+def execute_tool_action(
+    action,
+    state,
+    *,
+    tools=None,
+    tool_specs=None,
+    confirmation_handler=None,
+):
+    """Execute one allowlisted action with validation and write guards."""
+    tools = AVAILABLE_TOOLS if tools is None else tools
+    tool_specs = TOOL_SPECS if tool_specs is None else tool_specs
+
+    fingerprint = _action_fingerprint(action)
+    attempt = state.action_attempts.get(fingerprint, 0) + 1
+    state.action_attempts[fingerprint] = attempt
+    if attempt > 1:
+        observation = _error_observation(
+            "REPEATED_ACTION",
+            "Action giống hệt đã được xử lý; hãy đổi hướng hoặc kết luận.",
+            attempt=attempt,
+        )
+        return ToolExecutionResult(
+            observation=observation,
+            executed=False,
+            error_code="REPEATED_ACTION",
+            should_stop=attempt >= 3,
+        )
+
+    tool = tools.get(action.tool_name)
+    spec = tool_specs.get(action.tool_name)
+    if tool is None or spec is None:
+        observation = _error_observation(
+            "UNKNOWN_TOOL",
+            "Tool không nằm trong danh sách cho phép.",
+            available_tools=sorted(tools),
+        )
+        return ToolExecutionResult(
+            observation=observation,
+            executed=False,
+            error_code="UNKNOWN_TOOL",
+        )
+
+    try:
+        inspect.signature(tool).bind(*action.arguments)
+    except TypeError:
+        observation = _error_observation(
+            "INVALID_ARGUMENTS",
+            "Số lượng hoặc cấu trúc tham số của tool không hợp lệ.",
+            required_args=spec.get("required_args", []),
+        )
+        return ToolExecutionResult(
+            observation=observation,
+            executed=False,
+            error_code="INVALID_ARGUMENTS",
+        )
+
+    if spec.get("read_only") is not True:
+        precondition_error = _write_precondition_error(action, state)
+        if precondition_error is not None:
+            return ToolExecutionResult(
+                observation=precondition_error,
+                executed=False,
+                error_code="PRECONDITION_FAILED",
+            )
+
+        confirmed = False
+        if confirmation_handler is not None:
+            try:
+                confirmed = bool(confirmation_handler(action))
+            except Exception:
+                confirmed = False
+        if not confirmed:
+            observation = _error_observation(
+                "CONFIRMATION_DENIED",
+                "Người dùng chưa xác nhận thao tác làm thay đổi dữ liệu.",
+            )
+            return ToolExecutionResult(
+                observation=observation,
+                executed=False,
+                error_code="CONFIRMATION_DENIED",
+                should_stop=True,
+            )
+
+    try:
+        observation = tool(*action.arguments)
+    except Exception:
+        observation = _error_observation(
+            "TOOL_EXCEPTION",
+            "Tool gặp lỗi ngoài dự kiến; chi tiết nhạy cảm đã được ẩn.",
+        )
+        return ToolExecutionResult(
+            observation=observation,
+            executed=False,
+            error_code="TOOL_EXCEPTION",
+        )
+
+    _record_tool_evidence(action, observation, state)
+    error_code = (
+        str(observation["error"])
+        if isinstance(observation, dict) and observation.get("error")
+        else None
+    )
+    return ToolExecutionResult(
+        observation=observation,
+        executed=True,
+        error_code=error_code,
     )
 
 
