@@ -24,13 +24,30 @@ if sys.stdout.encoding != 'utf-8':
         pass
 
 # Import prompt của Role 3 và Multi-Provider Adapter
-from prompts import CHATBOT_BASELINE_PROMPT
+from guardrails import validate_input, validate_output
+from prompts import (
+    CHATBOT_BASELINE_PROMPT,
+    MAX_ITERATIONS,
+    REACT_SYSTEM_PROMPT,
+)
 from providers import get_llm_provider
 from tools import AVAILABLE_TOOLS, TOOL_SPECS
 
 load_dotenv()
 
 BASELINE_CASE_LIMIT = 5
+REACT_MAX_ITERATIONS = max(MAX_ITERATIONS, 6)
+REACT_RUNTIME_PROMPT = (
+    f"{REACT_SYSTEM_PROMPT}\n\n"
+    "# RUNTIME OVERRIDE\n"
+    f"Orchestrator cho phép tối đa {REACT_MAX_ITERATIONS} lượt suy luận "
+    "để hoàn tất các luồng cần 4 tool calls. Giới hạn runtime này thay cho "
+    "con số thấp hơn được mô tả ở trên."
+)
+SAFE_FALLBACK_ANSWER = (
+    "Xin lỗi, tôi chưa thể hoàn tất yêu cầu một cách an toàn. "
+    "Vui lòng kiểm tra lại thông tin và thử lại."
+)
 
 REACT_ACTION_RE = re.compile(
     (
@@ -85,6 +102,24 @@ class ToolExecutionResult:
     executed: bool
     error_code: Optional[str] = None
     should_stop: bool = False
+
+
+@dataclass(frozen=True)
+class AgentTraceStep:
+    iteration: int
+    thought: Optional[str] = None
+    action: Optional[AgentAction] = None
+    observation: Any = None
+    final_answer: Optional[str] = None
+
+
+@dataclass
+class AgentRunResult:
+    final_answer: str
+    trace: list[AgentTraceStep]
+    stop_reason: str
+    state: AgentState
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _parse_error(raw_output, code, message):
@@ -391,6 +426,217 @@ def execute_tool_action(
         observation=observation,
         executed=True,
         error_code=error_code,
+    )
+
+
+def _append_observation(transcript, observation):
+    transcript.append(
+        f"Observation: {serialize_observation(observation)}"
+    )
+
+
+def _agent_result(
+    *,
+    final_answer,
+    trace,
+    stop_reason,
+    state,
+    tool_calls,
+):
+    return AgentRunResult(
+        final_answer=final_answer,
+        trace=trace,
+        stop_reason=stop_reason,
+        state=state,
+        tool_calls=tool_calls,
+    )
+
+
+def run_react_agent(
+    user_query,
+    provider,
+    *,
+    tools=None,
+    tool_specs=None,
+    confirmation_handler=None,
+    max_iterations=None,
+):
+    """Run the guarded Thought -> Action -> Observation loop."""
+    tools = AVAILABLE_TOOLS if tools is None else tools
+    tool_specs = TOOL_SPECS if tool_specs is None else tool_specs
+    iteration_limit = (
+        REACT_MAX_ITERATIONS
+        if max_iterations is None
+        else max(1, int(max_iterations))
+    )
+    state = AgentState()
+    trace = []
+    tool_calls = []
+
+    input_result = validate_input(user_query)
+    if not input_result.allowed:
+        observation = _error_observation(
+            "INPUT_BLOCKED",
+            "Yêu cầu bị chặn bởi lớp bảo vệ đầu vào.",
+        )
+        trace.append(AgentTraceStep(iteration=0, observation=observation))
+        return _agent_result(
+            final_answer=SAFE_FALLBACK_ANSWER,
+            trace=trace,
+            stop_reason="input_blocked",
+            state=state,
+            tool_calls=tool_calls,
+        )
+
+    transcript = [f"User: {input_result.sanitized_text}"]
+
+    for iteration in range(1, iteration_limit + 1):
+        prompt = "\n\n".join(transcript)
+        try:
+            model_output = provider.generate(
+                prompt,
+                system_prompt=REACT_RUNTIME_PROMPT,
+            )
+        except Exception:
+            observation = _error_observation(
+                "PROVIDER_ERROR",
+                "Không thể kết nối LLM provider; chi tiết lỗi đã được ẩn.",
+            )
+            trace.append(
+                AgentTraceStep(
+                    iteration=iteration,
+                    observation=observation,
+                )
+            )
+            return _agent_result(
+                final_answer=SAFE_FALLBACK_ANSWER,
+                trace=trace,
+                stop_reason="provider_error",
+                state=state,
+                tool_calls=tool_calls,
+            )
+
+        parsed = parse_agent_output(model_output)
+        if parsed.kind == "error":
+            observation = _error_observation(
+                parsed.error_code or "INVALID_FORMAT",
+                parsed.error_message or "Output của model không hợp lệ.",
+            )
+            trace.append(
+                AgentTraceStep(
+                    iteration=iteration,
+                    observation=observation,
+                )
+            )
+            _append_observation(transcript, observation)
+            continue
+
+        if parsed.kind == "final":
+            guard_result = validate_output(
+                parsed.raw_output,
+                is_final_answer=True,
+            )
+            if guard_result.allowed:
+                final_parsed = parse_agent_output(
+                    guard_result.sanitized_text
+                )
+                final_answer = (
+                    final_parsed.final_answer
+                    if final_parsed.kind == "final"
+                    else parsed.final_answer
+                )
+                trace.append(
+                    AgentTraceStep(
+                        iteration=iteration,
+                        final_answer=final_answer,
+                    )
+                )
+                return _agent_result(
+                    final_answer=final_answer,
+                    trace=trace,
+                    stop_reason="completed",
+                    state=state,
+                    tool_calls=tool_calls,
+                )
+
+            observation = _error_observation(
+                "OUTPUT_BLOCKED",
+                "Câu trả lời cuối bị chặn bởi lớp bảo vệ đầu ra.",
+            )
+            trace.append(
+                AgentTraceStep(
+                    iteration=iteration,
+                    observation=observation,
+                )
+            )
+            _append_observation(transcript, observation)
+            continue
+
+        guard_result = validate_output(
+            parsed.raw_output,
+            is_final_answer=False,
+        )
+        if not guard_result.allowed:
+            observation = _error_observation(
+                "OUTPUT_BLOCKED",
+                "Action bị chặn bởi lớp bảo vệ đầu ra.",
+            )
+            trace.append(
+                AgentTraceStep(
+                    iteration=iteration,
+                    thought=parsed.action.thought,
+                    observation=observation,
+                )
+            )
+            _append_observation(transcript, observation)
+            continue
+
+        execution = execute_tool_action(
+            parsed.action,
+            state,
+            tools=tools,
+            tool_specs=tool_specs,
+            confirmation_handler=confirmation_handler,
+        )
+        trace.append(
+            AgentTraceStep(
+                iteration=iteration,
+                thought=parsed.action.thought,
+                action=parsed.action,
+                observation=execution.observation,
+            )
+        )
+        tool_calls.append(
+            {
+                "tool_name": parsed.action.tool_name,
+                "arguments": list(parsed.action.arguments),
+                "executed": execution.executed,
+                "observation": execution.observation,
+            }
+        )
+        transcript.append(guard_result.sanitized_text)
+        _append_observation(transcript, execution.observation)
+
+        if execution.should_stop:
+            reason = (
+                execution.error_code.lower()
+                if execution.error_code
+                else "tool_stop"
+            )
+            return _agent_result(
+                final_answer=SAFE_FALLBACK_ANSWER,
+                trace=trace,
+                stop_reason=reason,
+                state=state,
+                tool_calls=tool_calls,
+            )
+
+    return _agent_result(
+        final_answer=SAFE_FALLBACK_ANSWER,
+        trace=trace,
+        stop_reason="max_iterations",
+        state=state,
+        tool_calls=tool_calls,
     )
 
 
