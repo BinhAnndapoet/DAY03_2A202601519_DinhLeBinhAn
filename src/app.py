@@ -3,9 +3,13 @@
 File chính ghép nối tất cả các thành phần: Tools + Prompts + Test Cases + Multi-Provider.
 """
 
+import csv
 import json
 import os
+import re
 import sys
+from dataclasses import dataclass
+from typing import Any, Optional
 from dotenv import load_dotenv
 
 # Đảm bảo import các module cùng thư mục src/ hoạt động mượt mà
@@ -25,6 +29,132 @@ from providers import get_llm_provider
 load_dotenv()
 
 BASELINE_CASE_LIMIT = 5
+
+REACT_ACTION_RE = re.compile(
+    (
+        r"^\s*Thought:\s*(?P<thought>.+?)\s*\n"
+        r"Action:\s*(?P<tool>[A-Za-z_]\w*)"
+        r"\[(?P<arguments>.*)\]\s*$"
+    ),
+    re.DOTALL,
+)
+REACT_FINAL_RE = re.compile(
+    r"^\s*Final Answer:\s*(?P<answer>.+?)\s*$",
+    re.DOTALL,
+)
+
+
+@dataclass(frozen=True)
+class AgentAction:
+    thought: str
+    tool_name: str
+    arguments: list[Any]
+    raw_output: str
+
+
+@dataclass(frozen=True)
+class ParsedAgentOutput:
+    kind: str
+    raw_output: str
+    action: Optional[AgentAction] = None
+    final_answer: Optional[str] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+def _parse_error(raw_output, code, message):
+    return ParsedAgentOutput(
+        kind="error",
+        raw_output=raw_output,
+        error_code=code,
+        error_message=message,
+    )
+
+
+def _parse_action_arguments(arguments_text):
+    if not arguments_text.strip():
+        return []
+
+    try:
+        return json.loads(f"[{arguments_text}]")
+    except json.JSONDecodeError:
+        try:
+            return [
+                value.strip()
+                for value in next(
+                    csv.reader(
+                        [arguments_text],
+                        skipinitialspace=True,
+                        strict=True,
+                    )
+                )
+            ]
+        except (csv.Error, StopIteration):
+            raise ValueError("malformed action arguments") from None
+
+
+def parse_agent_output(model_output):
+    """Parse output ReAct mà không thực thi code từ arguments."""
+    text = (model_output or "").strip()
+
+    if "Action:" in text and "Final Answer:" in text:
+        return _parse_error(
+            text,
+            "MIXED_OUTPUT",
+            "Không được trộn Action và Final Answer.",
+        )
+
+    final_match = REACT_FINAL_RE.fullmatch(text)
+    if final_match:
+        return ParsedAgentOutput(
+            kind="final",
+            raw_output=text,
+            final_answer=final_match.group("answer").strip(),
+        )
+
+    action_match = REACT_ACTION_RE.fullmatch(text)
+    if not action_match:
+        return _parse_error(
+            text,
+            "INVALID_FORMAT",
+            (
+                "Output phải là Thought + Action hoặc "
+                "một Final Answer."
+            ),
+        )
+
+    thought = action_match.group("thought").strip()
+    if not thought:
+        return _parse_error(
+            text,
+            "INVALID_FORMAT",
+            "Thought công khai không được rỗng.",
+        )
+
+    try:
+        arguments = _parse_action_arguments(
+            action_match.group("arguments")
+        )
+    except ValueError:
+        return _parse_error(
+            text,
+            "MALFORMED_ARGUMENTS",
+            (
+                "Arguments phải là chuỗi phân tách bằng dấu phẩy "
+                "hoặc JSON values hợp lệ."
+            ),
+        )
+
+    return ParsedAgentOutput(
+        kind="action",
+        raw_output=text,
+        action=AgentAction(
+            thought=thought,
+            tool_name=action_match.group("tool"),
+            arguments=arguments,
+            raw_output=text,
+        ),
+    )
 
 
 def load_test_cases(config_path=None):

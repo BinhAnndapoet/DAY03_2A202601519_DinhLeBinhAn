@@ -14,6 +14,8 @@ from guardrails import validate_output
 from prompts import REACT_SYSTEM_PROMPT
 from tools import AVAILABLE_TOOLS, TOOL_SPECS
 
+import app
+
 
 CANONICAL_TOOL_NAMES = {
     "lookup_order",
@@ -102,6 +104,96 @@ class ReactContractTests(unittest.TestCase):
         )
 
         self.assertTrue(result.allowed, result.summary())
+
+
+class ReactParserTests(unittest.TestCase):
+    def test_parses_current_unquoted_single_argument_contract(self):
+        result = app.parse_agent_output(
+            (
+                "Thought: Cần tra cứu đơn hàng.\n"
+                "Action: lookup_order[ORD-2001]"
+            )
+        )
+
+        self.assertEqual("action", result.kind)
+        self.assertEqual("Cần tra cứu đơn hàng.", result.action.thought)
+        self.assertEqual("lookup_order", result.action.tool_name)
+        self.assertEqual(["ORD-2001"], result.action.arguments)
+
+    def test_also_parses_json_quoted_arguments(self):
+        result = app.parse_agent_output(
+            (
+                "Thought: Cần tra cứu đơn hàng.\n"
+                'Action: lookup_order["ORD-2001"]'
+            )
+        )
+
+        self.assertEqual(["ORD-2001"], result.action.arguments)
+
+    def test_parses_unicode_multi_argument_action(self):
+        result = app.parse_agent_output(
+            (
+                "Thought: Cần kiểm tra tồn kho.\n"
+                "Action: check_inventory[Áo thun basic, L, Trắng]"
+            )
+        )
+
+        self.assertEqual(
+            ["Áo thun basic", "L", "Trắng"],
+            result.action.arguments,
+        )
+
+    def test_parses_empty_optional_arguments(self):
+        result = app.parse_agent_output(
+            (
+                "Thought: Cần xem chính sách chung.\n"
+                "Action: get_return_policy[]"
+            )
+        )
+
+        self.assertEqual([], result.action.arguments)
+
+    def test_parses_final_answer(self):
+        result = app.parse_agent_output(
+            "Final Answer: Đơn ORD-2001 đã được giao."
+        )
+
+        self.assertEqual("final", result.kind)
+        self.assertEqual(
+            "Đơn ORD-2001 đã được giao.",
+            result.final_answer,
+        )
+
+    def test_reports_malformed_quoted_arguments(self):
+        result = app.parse_agent_output(
+            (
+                "Thought: Cần tra cứu đơn.\n"
+                'Action: lookup_order["ORD-2001]'
+            )
+        )
+
+        self.assertEqual("error", result.kind)
+        self.assertEqual("MALFORMED_ARGUMENTS", result.error_code)
+
+    def test_rejects_mixed_action_and_final_answer(self):
+        result = app.parse_agent_output(
+            (
+                "Thought: Cần tra cứu.\n"
+                "Action: lookup_order[ORD-2001]\n"
+                "Final Answer: Đơn đã giao."
+            )
+        )
+
+        self.assertEqual("error", result.kind)
+        self.assertEqual("MIXED_OUTPUT", result.error_code)
+
+    def test_rejects_missing_public_thought(self):
+        result = app.parse_agent_output(
+            "Action: lookup_order[ORD-2001]"
+        )
+
+        self.assertEqual("error", result.kind)
+        self.assertEqual("INVALID_FORMAT", result.error_code)
 
 
 if __name__ == "__main__":
