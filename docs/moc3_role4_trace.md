@@ -20,23 +20,7 @@ Observation:
 
 ### Iteration 2
 
-Observation:
-
-```json
-{"error": "UNGROUNDED_FINAL", "message": "Final Answer phải phản ánh đầy đủ dữ liệu quan trọng từ Observation.", "missing_facts": ["2026-07-23"]}
-```
-
-### Iteration 3
-
-Observation:
-
-```json
-{"error": "UNGROUNDED_FINAL", "message": "Final Answer phải phản ánh đầy đủ dữ liệu quan trọng từ Observation.", "missing_facts": ["2026-07-23"]}
-```
-
-### Iteration 4
-
-Final Answer: Đơn hàng ORD-2001 đã được giao tới vào ngày 23 tháng 7 năm 2026. Sản phẩm trong đơn là áo thun basic màu trắng, kích thước M.
+Final Answer: Đơn hàng ORD-2001 đã được giao tới với sản phẩm "Áo thun basic" màu Trắng, size M vào ngày 23 tháng 7 năm 2026.
 
 Stop reason: `completed`
 
@@ -48,7 +32,7 @@ User input: Đơn ORD-2007 bao giờ tới vậy shop?
 
 ### Iteration 1
 
-Thought: Cần tra cứu đơn hàng theo mã đơn để biết trạng thái giao hàng.
+Thought: Cần tra cứu đơn hàng theo mã đơn để có thông tin chi tiết.
 
 Action: `lookup_order[ORD-2007]`
 
@@ -60,7 +44,7 @@ Observation:
 
 ### Iteration 2
 
-Final Answer: Đơn hàng ORD-2007 hiện đang trong trạng thái "đang giao" và dự kiến sẽ tới vào ngày 31 tháng 7 năm 2026.
+Final Answer: Đơn ORD-2007 đang trong quá trình vận chuyển và dự kiến sẽ đến vào ngày 31 tháng 7 năm 2026. Sản phẩm trong đơn gồm có quần jeans skinny màu xanh đậm, kích thước 29.
 
 Stop reason: `completed`
 
@@ -72,7 +56,7 @@ User input: Mình quên mã đơn rồi, email của mình là linh.pham@email.c
 
 ### Iteration 1
 
-Thought: Cần tìm các mã đơn hàng liên kết với email đã cung cấp.
+Thought: Cần tìm danh sách mã đơn hàng theo email của người dùng.
 
 Action: `lookup_orders_by_email[linh.pham@email.com]`
 
@@ -87,7 +71,7 @@ Observation:
 Observation:
 
 ```json
-{"error": "INVALID_FORMAT", "message": "Output phải là Thought + Action hoặc một Final Answer."}
+{"error": "MIXED_OUTPUT", "message": "Không được trộn Action và Final Answer."}
 ```
 
 ### Iteration 3
@@ -103,7 +87,7 @@ Observation:
 Observation:
 
 ```json
-{"error": "MIXED_OUTPUT", "message": "Không được trộn Action và Final Answer."}
+{"error": "INVALID_FORMAT", "message": "Output phải là Thought + Action hoặc một Final Answer."}
 ```
 
 ### Iteration 5
@@ -119,7 +103,7 @@ Observation:
 Observation:
 
 ```json
-{"error": "INVALID_FORMAT", "message": "Output phải là Thought + Action hoặc một Final Answer."}
+{"error": "MIXED_OUTPUT", "message": "Không được trộn Action và Final Answer."}
 ```
 
 ### Iteration 7
@@ -136,7 +120,7 @@ User input: Áo thun trong đơn ORD-2001 bị nhỏ, mình muốn đổi lên s
 
 ### Iteration 1
 
-Thought: Cần tra cứu đơn hàng để kiểm tra tình trạng áo thun trước.
+Thought: Cần tra cứu đơn hàng theo mã đơn để xác định sản phẩm cần đổi.
 
 Action: `lookup_order[ORD-2001]`
 
@@ -148,7 +132,7 @@ Observation:
 
 ### Iteration 2
 
-Thought: Cần kiểm tra độ đủ điều kiện đổi cho áo thun trước khi tiến hành kiểm tra tồn kho.
+Thought: Cần kiểm tra xem sản phẩm có đủ điều kiện đổi hay không trước.
 
 Action: `check_return_eligibility[ORD-2001, ORD-2001-A]`
 
@@ -160,7 +144,7 @@ Observation:
 
 ### Iteration 3
 
-Thought: Áo thun đủ điều kiện đổi, cần kiểm tra tồn kho size L.
+Thought: Cần kiểm tra tồn kho size L của sản phẩm trước khi thực hiện đổi.
 
 Action: `check_inventory[Áo thun basic, L, Trắng]`
 
@@ -172,21 +156,17 @@ Observation:
 
 ### Iteration 4
 
-Thought: Có tồn kho size L, nên tiến hành tạo yêu cầu đổi.
+Thought: Cả điều kiện đổi và tồn kho đều hợp lệ, sẵn sàng tạo yêu cầu đổi.
 
 Action: `initiate_exchange_request[ORD-2001, ORD-2001-A, L, Trắng]`
 
 Observation:
 
 ```json
-{"item_id": "ORD-2001-A", "new_color": "Trắng", "new_size": "L", "order_id": "ORD-2001", "status": "created", "ticket_id": "EXC-0001"}
+{"error": "CONFIRMATION_DENIED", "message": "Người dùng chưa xác nhận thao tác làm thay đổi dữ liệu."}
 ```
 
-### Iteration 5
-
-Final Answer: Yêu cầu đổi áo thun từ size M sang size L đã được tạo thành công. Mã yêu cầu đổi là EXC-0001.
-
-Stop reason: `completed`
+Stop reason: `confirmation_denied`
 
 ---
 
@@ -196,7 +176,7 @@ User input: Mình muốn trả cái đầm đơn ORD-2002... à nhầm, dùng đ
 
 ### Iteration 1
 
-Thought: Cần tra cứu đơn hàng theo mã đơn ORD-2015 trước để kiểm tra sản phẩm.
+Thought: Cần tra cứu đơn hàng theo mã đơn ORD-2015 trước.
 
 Action: `lookup_order[ORD-2015]`
 
@@ -208,7 +188,7 @@ Observation:
 
 ### Iteration 2
 
-Thought: Cần kiểm tra điều kiện đổi/trả cho sản phẩm áo khoác blazer nữ trong đơn ORD-2015.
+Thought: Cần kiểm tra điều kiện đổi/trả cho sản phẩm blazer trong đơn hàng.
 
 Action: `check_return_eligibility[ORD-2015, ORD-2015-A]`
 
@@ -220,7 +200,7 @@ Observation:
 
 ### Iteration 3
 
-Thought: Sản phẩm đủ điều kiện để trả hàng, mình sẽ tiến hành tạo yêu cầu trả hàng.
+Thought: Người dùng muốn trả hàng, đã đủ điều kiện nên cần xác nhận lý do và phương thức hoàn tiền.
 
 Action: `initiate_return_request[ORD-2015, ORD-2015-A, không hợp, original_payment]`
 
@@ -232,7 +212,7 @@ Observation:
 
 ### Iteration 4
 
-Final Answer: Yêu cầu trả hàng cho áo khoác blazer nữ trong đơn ORD-2015 đã được tạo thành công. Mã yêu cầu là RET-0001.
+Final Answer: Yêu cầu trả hàng cho sản phẩm "Áo khoác blazer nữ" trong đơn ORD-2015 đã được tạo thành công. Bạn sẽ được hoàn tiền qua phương thức thanh toán gốc. Mã yêu cầu trả hàng là RET-0001.
 
 Stop reason: `completed`
 
