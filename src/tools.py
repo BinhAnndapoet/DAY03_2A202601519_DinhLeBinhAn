@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Union
 ToolResult = Dict[str, Any]
 EmailLookupResult = Union[List[str], ToolResult]
 
-_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "test_cases.json"
+_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "mock_data.json"
 
 # Trạng thái tạo ticket được giữ trong bộ nhớ cho phiên demo hiện tại.
 # Dictionary giúp lời gọi lặp lại có tính idempotent, không tạo ticket trùng.
