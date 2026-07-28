@@ -32,8 +32,9 @@ class AppImportTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_app_does_not_expose_legacy_tool_registry(self):
-        self.assertFalse(hasattr(app, "AVAILABLE_TOOLS"))
+    def test_app_uses_role_2_tool_registry(self):
+        self.assertIn("lookup_order", app.AVAILABLE_TOOLS)
+        self.assertEqual(set(app.AVAILABLE_TOOLS), set(app.TOOL_SPECS))
 
 
 class LoadTestCasesTests(unittest.TestCase):
@@ -151,24 +152,31 @@ class BaselineSuiteTests(unittest.TestCase):
 
 
 class AppSmokeTests(unittest.TestCase):
-    def test_main_runs_five_baseline_cases_with_mock_provider(self):
-        environment = os.environ.copy()
-        environment["LLM_PROVIDER"] = "mock"
-        environment["PYTHONIOENCODING"] = "utf-8"
+    def test_main_runs_five_react_cases_and_writes_trace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_path = Path(temp_dir) / "trace.md"
+            environment = os.environ.copy()
+            environment["LLM_PROVIDER"] = "mock"
+            environment["PYTHONIOENCODING"] = "utf-8"
+            environment["REACT_TRACE_PATH"] = str(trace_path)
 
-        result = subprocess.run(
-            [sys.executable, "src/app.py"],
-            cwd=PROJECT_ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
+            result = subprocess.run(
+                [sys.executable, "src/app.py"],
+                cwd=PROJECT_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
 
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("Đã tải 20 test cases", result.stdout)
-        self.assertEqual(5, result.stdout.count("🧪 BASELINE CASE"))
-        self.assertNotIn("[REACT AGENT]", result.stdout)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("Đã tải 20 test cases", result.stdout)
+            self.assertEqual(5, result.stdout.count("🧪 REACT CASE"))
+            self.assertTrue(trace_path.exists())
+            self.assertIn(
+                "# Mốc 3 Role 4 — ReAct Trace",
+                trace_path.read_text(encoding="utf-8"),
+            )
 
 
 if __name__ == "__main__":

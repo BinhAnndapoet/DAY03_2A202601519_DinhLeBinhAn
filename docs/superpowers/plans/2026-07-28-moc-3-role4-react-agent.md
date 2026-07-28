@@ -1,5 +1,11 @@
 # Role 4 Milestone 3 ReAct Agent Implementation Plan
 
+> **Implementation status (2026-07-28): completed.** Contract thực tế chấp nhận
+> cả arguments CSV-style của Role 3 và JSON-quoted; runtime dùng
+> `REACT_MAX_ITERATIONS = max(MAX_ITERATIONS, 6)` mà không sửa file của Role 3.
+> Suite mặc định chạy 5 case và xuất Thought → Action → Observation vào
+> `docs/moc3_role4_trace.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Tích hợp ReAct Agent V1 + V2 vào `src/app.py`, gọi tool qua registry, tạo Observation thật, tự phục hồi lỗi định dạng và dừng an toàn trước loop hoặc side effect không hợp lệ.

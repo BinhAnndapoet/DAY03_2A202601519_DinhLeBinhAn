@@ -1,5 +1,12 @@
 # Thiết kế Mốc 3 Role 4 — ReAct Agent V1 + V2
 
+> Cập nhật sau tích hợp (2026-07-28): contract đã merge của Role 3 dùng
+> arguments phân tách bằng dấu phẩy, nên parser thực tế hỗ trợ cả dạng đó và
+> JSON-quoted mà không dùng `eval`. `src/app.py` giữ nguyên
+> `prompts.MAX_ITERATIONS = 3` nhưng cưỡng chế runtime budget tối thiểu 6 lượt
+> để TC04 có thể chạy bốn tool. Trace thực thi được xuất tại
+> `docs/moc3_role4_trace.md`.
+
 ## 1. Mục tiêu
 
 Chuẩn bị kiến trúc tích hợp cho nhiệm vụ Role 4 ở Mốc 3 của đề tài

@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 from dotenv import load_dotenv
 
@@ -36,13 +37,20 @@ from tools import AVAILABLE_TOOLS, TOOL_SPECS
 load_dotenv()
 
 BASELINE_CASE_LIMIT = 5
+REACT_CASE_LIMIT = 5
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_REACT_TRACE_PATH = PROJECT_ROOT / "docs" / "moc3_role4_trace.md"
 REACT_MAX_ITERATIONS = max(MAX_ITERATIONS, 6)
 REACT_RUNTIME_PROMPT = (
     f"{REACT_SYSTEM_PROMPT}\n\n"
     "# RUNTIME OVERRIDE\n"
     f"Orchestrator cho phép tối đa {REACT_MAX_ITERATIONS} lượt suy luận "
     "để hoàn tất các luồng cần 4 tool calls. Giới hạn runtime này thay cho "
-    "con số thấp hơn được mô tả ở trên."
+    "con số thấp hơn được mô tả ở trên.\n"
+    "Với mọi yêu cầu đổi/trả, BẮT BUỘC gọi lookup_order trước "
+    "check_return_eligibility để lấy đúng item, tên sản phẩm và màu. "
+    "Sau mỗi Observation, chỉ xuất đúng một Thought + Action hoặc đúng một "
+    "Final Answer, không thêm Markdown hay lời dẫn."
 )
 SAFE_FALLBACK_ANSWER = (
     "Xin lỗi, tôi chưa thể hoàn tất yêu cầu một cách an toàn. "
@@ -94,6 +102,7 @@ class AgentState:
     inventory: dict[tuple[str, str, str], dict[str, Any]] = field(
         default_factory=dict
     )
+    write_results: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -303,21 +312,84 @@ def _write_precondition_error(action, state):
     return None
 
 
+def _read_precondition_error(action, state):
+    args = action.arguments
+
+    if action.tool_name == "check_return_eligibility":
+        order_id, item_id = args
+        if _find_order_item(state, order_id, item_id) is None:
+            return _error_observation(
+                "PRECONDITION_REQUIRED",
+                "Phải tra cứu đơn hàng và xác minh item trước.",
+                suggested_action=f"lookup_order[{order_id}]",
+            )
+
+    if action.tool_name == "check_inventory":
+        product, _size, color = (str(value) for value in args)
+        known_items = []
+        eligible_variant_found = False
+        for order_id, order in state.orders.items():
+            for item in order.get("items", []):
+                item_name = str(item.get("name", ""))
+                item_color = str(item.get("color", ""))
+                item_id = str(item.get("item_id", ""))
+                known_items.append(
+                    {
+                        "product": item_name,
+                        "color": item_color,
+                        "item_id": item_id,
+                    }
+                )
+                exact_variant = (
+                    item_name.casefold() == product.casefold()
+                    and item_color.casefold() == color.casefold()
+                )
+                evidence = state.eligibility.get((str(order_id), item_id))
+                if exact_variant and evidence and evidence.get("eligible") is True:
+                    eligible_variant_found = True
+
+        if not state.orders:
+            return _error_observation(
+                "PRECONDITION_REQUIRED",
+                "Phải tra cứu đơn hàng trước khi kiểm tra biến thể đổi.",
+                suggested_action="lookup_order[order_id]",
+            )
+        if not eligible_variant_found:
+            return _error_observation(
+                "PRECONDITION_FAILED",
+                (
+                    "Tên sản phẩm/màu phải khớp item đã tra cứu và item "
+                    "phải đủ điều kiện đổi."
+                ),
+                known_items=known_items,
+            )
+
+    return None
+
+
 def _record_tool_evidence(action, observation, state):
+    args = action.arguments
+    if action.tool_name == "lookup_orders_by_email" and args:
+        if not isinstance(observation, dict) or "error" not in observation:
+            state.orders_by_email[str(args[0])] = observation
+        return
+
     if not isinstance(observation, dict) or "error" in observation:
         return
 
-    args = action.arguments
     if action.tool_name == "lookup_order" and args:
         state.orders[str(args[0])] = observation
-    elif action.tool_name == "lookup_orders_by_email" and args:
-        state.orders_by_email[str(args[0])] = observation
     elif action.tool_name == "check_return_eligibility":
         state.eligibility[(str(args[0]), str(args[1]))] = observation
     elif action.tool_name == "check_inventory":
         state.inventory[
             (str(args[0]), str(args[1]), str(args[2]))
         ] = observation
+    elif action.tool_name in {
+        "initiate_return_request",
+        "initiate_exchange_request",
+    }:
+        state.write_results.append(observation)
 
 
 def execute_tool_action(
@@ -376,9 +448,21 @@ def execute_tool_action(
             error_code="INVALID_ARGUMENTS",
         )
 
+    if spec.get("read_only") is True:
+        precondition_error = _read_precondition_error(action, state)
+        if precondition_error is not None:
+            state.action_attempts.pop(fingerprint, None)
+            error_code = str(precondition_error["error"])
+            return ToolExecutionResult(
+                observation=precondition_error,
+                executed=False,
+                error_code=error_code,
+            )
+
     if spec.get("read_only") is not True:
         precondition_error = _write_precondition_error(action, state)
         if precondition_error is not None:
+            state.action_attempts.pop(fingerprint, None)
             return ToolExecutionResult(
                 observation=precondition_error,
                 executed=False,
@@ -433,6 +517,78 @@ def _append_observation(transcript, observation):
     transcript.append(
         f"Observation: {serialize_observation(observation)}"
     )
+
+
+def _evidence_fact_present(fact, final_answer):
+    if fact in final_answer:
+        return True
+
+    date_match = re.fullmatch(
+        r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})",
+        fact,
+    )
+    if not date_match:
+        return False
+
+    year = int(date_match.group("year"))
+    month = int(date_match.group("month"))
+    day = int(date_match.group("day"))
+    variants = {
+        f"{day}/{month}/{year}",
+        f"{day:02d}/{month:02d}/{year}",
+        f"{day}-{month}-{year}",
+        f"{day:02d}-{month:02d}-{year}",
+        f"{day} tháng {month} năm {year}",
+    }
+    return any(variant in final_answer for variant in variants)
+
+
+def _final_evidence_error(final_answer, state):
+    required_facts = []
+
+    if state.write_results:
+        required_facts.extend(
+            str(result["ticket_id"])
+            for result in state.write_results
+            if result.get("ticket_id")
+        )
+    elif state.orders_by_email:
+        for order_ids in state.orders_by_email.values():
+            if isinstance(order_ids, list):
+                required_facts.extend(str(order_id) for order_id in order_ids)
+    else:
+        for order in state.orders.values():
+            if not isinstance(order, dict):
+                continue
+            if order.get("delivery_date"):
+                required_facts.append(str(order["delivery_date"]))
+            if order.get("eta"):
+                required_facts.append(str(order["eta"]))
+
+    missing_facts = [
+        fact
+        for fact in required_facts
+        if not _evidence_fact_present(fact, final_answer)
+    ]
+    if not missing_facts:
+        return None
+    return _error_observation(
+        "UNGROUNDED_FINAL",
+        "Final Answer phải phản ánh đầy đủ dữ liệu quan trọng từ Observation.",
+        missing_facts=missing_facts,
+    )
+
+
+def _evidence_fallback_answer(state):
+    for order_ids in state.orders_by_email.values():
+        if isinstance(order_ids, list) and order_ids:
+            joined_ids = ", ".join(str(order_id) for order_id in order_ids)
+            return (
+                f"Đã tìm thấy các đơn hàng: {joined_ids}. "
+                "Bạn muốn tiếp tục với đơn nào?"
+            )
+
+    return None
 
 
 def _agent_result(
@@ -545,6 +701,19 @@ def run_react_agent(
                     if final_parsed.kind == "final"
                     else parsed.final_answer
                 )
+                evidence_error = _final_evidence_error(
+                    final_answer,
+                    state,
+                )
+                if evidence_error is not None:
+                    trace.append(
+                        AgentTraceStep(
+                            iteration=iteration,
+                            observation=evidence_error,
+                        )
+                    )
+                    _append_observation(transcript, evidence_error)
+                    continue
                 trace.append(
                     AgentTraceStep(
                         iteration=iteration,
@@ -631,6 +800,22 @@ def run_react_agent(
                 tool_calls=tool_calls,
             )
 
+    fallback_answer = _evidence_fallback_answer(state)
+    if fallback_answer:
+        trace.append(
+            AgentTraceStep(
+                iteration=iteration_limit + 1,
+                final_answer=fallback_answer,
+            )
+        )
+        return _agent_result(
+            final_answer=fallback_answer,
+            trace=trace,
+            stop_reason="evidence_fallback",
+            state=state,
+            tool_calls=tool_calls,
+        )
+
     return _agent_result(
         final_answer=SAFE_FALLBACK_ANSWER,
         trace=trace,
@@ -638,6 +823,185 @@ def run_react_agent(
         state=state,
         tool_calls=tool_calls,
     )
+
+
+def _format_action(action):
+    arguments = ", ".join(str(value) for value in action.arguments)
+    return f"{action.tool_name}[{arguments}]"
+
+
+def _print_trace_step(step):
+    print(f"\n--- Iteration {step.iteration} ---")
+    if step.thought:
+        print(f"Thought: {step.thought}")
+    if step.action:
+        print(f"Action: {_format_action(step.action)}")
+    if step.observation is not None:
+        print(f"Observation: {serialize_observation(step.observation)}")
+    if step.final_answer:
+        print(f"Final Answer: {step.final_answer}")
+
+
+def run_react_suite(
+    test_cases,
+    provider,
+    *,
+    limit=REACT_CASE_LIMIT,
+    confirmation_handler=None,
+):
+    """Run selected test cases through the full ReAct orchestrator."""
+    selected_cases = test_cases[:limit]
+    results = []
+
+    for index, case in enumerate(selected_cases, start=1):
+        case_id = case.get("id", f"case-{index}")
+        title = case.get("title", "Không có tiêu đề")
+        user_query = case["user_input"]
+
+        print(f"\n{'=' * 60}")
+        print(
+            f"🧪 REACT CASE {index}/{len(selected_cases)}: "
+            f"{case_id} — {title}"
+        )
+        print(f"{'=' * 60}")
+        print(f"User: {user_query}")
+
+        run_result = run_react_agent(
+            user_query,
+            provider,
+            confirmation_handler=confirmation_handler,
+        )
+        for step in run_result.trace:
+            _print_trace_step(step)
+        print(f"Stop reason: {run_result.stop_reason}")
+
+        results.append(
+            {
+                "id": case_id,
+                "title": title,
+                "user_input": user_query,
+                "result": run_result,
+            }
+        )
+
+    return results
+
+
+def _redact_trace_text(value):
+    text = str(value)
+    for variable_name in (
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GEMINI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ):
+        secret = os.getenv(variable_name)
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    return re.sub(
+        r"\bsk-[A-Za-z0-9_-]{12,}\b",
+        "[REDACTED]",
+        text,
+    )
+
+
+def write_react_trace_markdown(test_cases, results, output_path):
+    """Export public Thought -> Action -> Observation steps to Markdown."""
+    del test_cases  # Results retain the exact selected case metadata.
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Mốc 3 Role 4 — ReAct Trace",
+        "",
+        (
+            "> Trace công khai của orchestrator. Không chứa API key "
+            "hoặc system prompt."
+        ),
+        "",
+    ]
+
+    for case_result in results:
+        run_result = case_result["result"]
+        lines.extend(
+            [
+                (
+                    f"## {_redact_trace_text(case_result['id'])} — "
+                    f"{_redact_trace_text(case_result['title'])}"
+                ),
+                "",
+                (
+                    "User input: "
+                    f"{_redact_trace_text(case_result['user_input'])}"
+                ),
+                "",
+            ]
+        )
+
+        for step in run_result.trace:
+            lines.extend([f"### Iteration {step.iteration}", ""])
+            if step.thought:
+                lines.extend(
+                    [
+                        f"Thought: {_redact_trace_text(step.thought)}",
+                        "",
+                    ]
+                )
+            if step.action:
+                lines.extend(
+                    [
+                        (
+                            "Action: `"
+                            f"{_redact_trace_text(_format_action(step.action))}"
+                            "`"
+                        ),
+                        "",
+                    ]
+                )
+            if step.observation is not None:
+                observation_text = _redact_trace_text(
+                    serialize_observation(step.observation)
+                )
+                lines.extend(
+                    [
+                        "Observation:",
+                        "",
+                        "```json",
+                        observation_text,
+                        "```",
+                        "",
+                    ]
+                )
+            if step.final_answer:
+                lines.extend(
+                    [
+                        (
+                            "Final Answer: "
+                            f"{_redact_trace_text(step.final_answer)}"
+                        ),
+                        "",
+                    ]
+                )
+
+        lines.extend(
+            [
+                f"Stop reason: `{run_result.stop_reason}`",
+                "",
+                "---",
+                "",
+            ]
+        )
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def cli_confirmation_handler(action):
+    """Ask for explicit confirmation before a state-changing tool call."""
+    prompt = f"Xác nhận thực thi {_format_action(action)}? [y/N]: "
+    try:
+        return input(prompt).strip().casefold() in {"y", "yes", "có", "co"}
+    except (EOFError, KeyboardInterrupt):
+        return False
 
 
 def load_test_cases(config_path=None):
@@ -713,7 +1077,7 @@ def run_baseline_suite(test_cases, provider, limit=5):
     return results
 
 
-def main():
+def run_baseline_main():
     """Khởi chạy mốc 2 của Role 4 với Chatbot Baseline."""
     print("=" * 60)
     print("🏫 ĐẠI HỌC VINUNI - MỐC 2: CHATBOT BASELINE")
@@ -736,6 +1100,38 @@ def main():
         provider,
         limit=BASELINE_CASE_LIMIT,
     )
+
+
+def main():
+    """Khởi chạy Mốc 3 Role 4 với ReAct Agent."""
+    print("=" * 60)
+    print("🏫 ĐẠI HỌC VINUNI - MỐC 3: REACT AGENT")
+    print("=" * 60)
+
+    provider = get_llm_provider()
+    model_name = getattr(provider, "model_name", "Offline Mock Mode")
+    print(
+        f"🔌 LLM Provider đang hoạt động: "
+        f"{provider.__class__.__name__} (Model: {model_name})"
+    )
+
+    test_cases = load_test_cases()
+    print(
+        f"✅ Đã tải {len(test_cases)} test cases; "
+        f"chạy {REACT_CASE_LIMIT} case đầu bằng ReAct Agent."
+    )
+    results = run_react_suite(
+        test_cases,
+        provider,
+        limit=REACT_CASE_LIMIT,
+        confirmation_handler=cli_confirmation_handler,
+    )
+    trace_path = Path(
+        os.getenv("REACT_TRACE_PATH", str(DEFAULT_REACT_TRACE_PATH))
+    )
+    write_react_trace_markdown(test_cases, results, trace_path)
+    print(f"\n📝 Đã xuất trace Markdown: {trace_path}")
+    return results
 
 
 if __name__ == "__main__":

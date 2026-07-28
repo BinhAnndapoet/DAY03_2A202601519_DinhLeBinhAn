@@ -1,6 +1,7 @@
 import inspect
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -337,6 +338,71 @@ class ReactExecutorTests(unittest.TestCase):
         self.assertFalse(result.executed)
         self.assertEqual("UNKNOWN_TOOL", result.error_code)
         self.assertFalse(result.should_stop)
+
+    def test_eligibility_requires_order_lookup_evidence(self):
+        action = self.action(
+            "check_return_eligibility",
+            ["ORD-2001", "ORD-2001-A"],
+        )
+        state = app.AgentState()
+        result = app.execute_tool_action(
+            action,
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+
+        self.assertFalse(result.executed)
+        self.assertEqual("PRECONDITION_REQUIRED", result.error_code)
+        self.assertEqual([], self.calls)
+
+        state.orders["ORD-2001"] = {
+            "items": [{"item_id": "ORD-2001-A"}]
+        }
+        retry = app.execute_tool_action(
+            action,
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+
+        self.assertTrue(retry.executed)
+        self.assertEqual(
+            [
+                (
+                    "check_return_eligibility",
+                    "ORD-2001",
+                    "ORD-2001-A",
+                )
+            ],
+            self.calls,
+        )
+
+    def test_inventory_requires_exact_item_evidence(self):
+        state = app.AgentState()
+        state.orders["ORD-2001"] = {
+            "items": [
+                {
+                    "item_id": "ORD-2001-A",
+                    "name": "Áo thun basic",
+                    "color": "Trắng",
+                }
+            ]
+        }
+        state.eligibility[("ORD-2001", "ORD-2001-A")] = {
+            "eligible": True,
+        }
+
+        result = app.execute_tool_action(
+            self.action("check_inventory", ["Ao thun", "L", "Trang"]),
+            state,
+            tools=self.tools,
+            tool_specs=self.specs,
+        )
+
+        self.assertFalse(result.executed)
+        self.assertEqual("PRECONDITION_FAILED", result.error_code)
+        self.assertEqual([], self.calls)
 
     def test_invalid_argument_count_does_not_call_tool(self):
         result = app.execute_tool_action(
@@ -751,6 +817,311 @@ class ReactLoopTests(unittest.TestCase):
             "CONFIRMATION_DENIED",
             result.trace[-1].observation["error"],
         )
+
+    def test_final_answer_must_include_all_order_ids_from_email_lookup(self):
+        def lookup_orders_by_email(email):
+            return ["ORD-2015", "ORD-2016"]
+
+        provider = ScriptedProvider(
+            [
+                (
+                    "Thought: Cần tìm đơn hàng theo email.\n"
+                    "Action: lookup_orders_by_email[linh.pham@email.com]"
+                ),
+                "Final Answer: Không tìm thấy đơn hàng nào.",
+                (
+                    "Final Answer: Email này có hai đơn ORD-2015 và "
+                    "ORD-2016; bạn muốn chọn đơn nào?"
+                ),
+            ]
+        )
+
+        result = app.run_react_agent(
+            "Tìm đơn bằng email linh.pham@email.com.",
+            provider,
+            tools={"lookup_orders_by_email": lookup_orders_by_email},
+            tool_specs={
+                "lookup_orders_by_email": {
+                    "required_args": ["email"],
+                    "read_only": True,
+                }
+            },
+        )
+
+        self.assertEqual("completed", result.stop_reason)
+        self.assertEqual(3, len(provider.calls))
+        self.assertEqual(
+            "UNGROUNDED_FINAL",
+            result.trace[1].observation["error"],
+        )
+        self.assertIn("ORD-2015", result.final_answer)
+        self.assertIn("ORD-2016", result.final_answer)
+
+    def test_final_answer_accepts_human_readable_observed_date(self):
+        state = app.AgentState()
+        state.orders["ORD-2001"] = {
+            "delivery_date": "2026-07-23",
+        }
+
+        error = app._final_evidence_error(
+            "Đơn đã giao ngày 23 tháng 7 năm 2026.",
+            state,
+        )
+
+        self.assertIsNone(error)
+
+    def test_email_lookup_uses_evidence_fallback_after_format_failures(self):
+        def lookup_orders_by_email(email):
+            return ["ORD-2015", "ORD-2016"]
+
+        provider = ScriptedProvider(
+            [
+                (
+                    "Thought: Cần tìm đơn hàng theo email.\n"
+                    "Action: lookup_orders_by_email[linh.pham@email.com]"
+                ),
+                "invalid output",
+            ]
+        )
+
+        result = app.run_react_agent(
+            "Tìm đơn bằng email linh.pham@email.com.",
+            provider,
+            tools={"lookup_orders_by_email": lookup_orders_by_email},
+            tool_specs={
+                "lookup_orders_by_email": {
+                    "required_args": ["email"],
+                    "read_only": True,
+                }
+            },
+            max_iterations=2,
+        )
+
+        self.assertEqual("evidence_fallback", result.stop_reason)
+        self.assertIn("ORD-2015", result.final_answer)
+        self.assertIn("ORD-2016", result.final_answer)
+
+    def test_exchange_happy_path_uses_four_tools_in_order(self):
+        calls = []
+
+        def lookup_order(order_id):
+            calls.append(("lookup_order", order_id))
+            return {
+                "order_id": order_id,
+                "status": "delivered",
+                "items": [
+                    {
+                        "item_id": "ORD-2001-A",
+                        "name": "Áo thun basic",
+                        "color": "Trắng",
+                    }
+                ],
+            }
+
+        def check_return_eligibility(order_id, item_id):
+            calls.append(
+                ("check_return_eligibility", order_id, item_id)
+            )
+            return {
+                "eligible": True,
+                "refund_method": "original_payment",
+            }
+
+        def check_inventory(product, size, color):
+            calls.append(("check_inventory", product, size, color))
+            return {"stock": 12}
+
+        def initiate_exchange_request(
+            order_id,
+            item_id,
+            new_size,
+            new_color,
+        ):
+            calls.append(
+                (
+                    "initiate_exchange_request",
+                    order_id,
+                    item_id,
+                    new_size,
+                    new_color,
+                )
+            )
+            return {"ticket_id": "EXC-001", "status": "created"}
+
+        provider = ScriptedProvider(
+            [
+                (
+                    "Thought: Cần tra cứu đơn hàng.\n"
+                    "Action: lookup_order[ORD-2001]"
+                ),
+                (
+                    "Thought: Cần kiểm tra điều kiện đổi.\n"
+                    "Action: check_return_eligibility[ORD-2001, ORD-2001-A]"
+                ),
+                (
+                    "Thought: Cần kiểm tra tồn kho biến thể đích.\n"
+                    "Action: check_inventory[Áo thun basic, L, Trắng]"
+                ),
+                (
+                    "Thought: Đã đủ bằng chứng để tạo yêu cầu đổi.\n"
+                    "Action: initiate_exchange_request"
+                    "[ORD-2001, ORD-2001-A, L, Trắng]"
+                ),
+                "Final Answer: Đã tạo yêu cầu đổi với mã EXC-001.",
+            ]
+        )
+        tools = {
+            "lookup_order": lookup_order,
+            "check_return_eligibility": check_return_eligibility,
+            "check_inventory": check_inventory,
+            "initiate_exchange_request": initiate_exchange_request,
+        }
+        specs = {
+            "lookup_order": {
+                "required_args": ["order_id"],
+                "read_only": True,
+            },
+            "check_return_eligibility": {
+                "required_args": ["order_id", "item_id"],
+                "read_only": True,
+            },
+            "check_inventory": {
+                "required_args": ["product", "size", "color"],
+                "read_only": True,
+            },
+            "initiate_exchange_request": {
+                "required_args": [
+                    "order_id",
+                    "item_id",
+                    "new_size",
+                    "new_color",
+                ],
+                "read_only": False,
+                "requires_confirmation": True,
+            },
+        }
+
+        result = app.run_react_agent(
+            "Đổi áo đơn ORD-2001 lên size L.",
+            provider,
+            tools=tools,
+            tool_specs=specs,
+            confirmation_handler=lambda action: True,
+        )
+
+        self.assertEqual("completed", result.stop_reason)
+        self.assertEqual(
+            [
+                ("lookup_order", "ORD-2001"),
+                (
+                    "check_return_eligibility",
+                    "ORD-2001",
+                    "ORD-2001-A",
+                ),
+                ("check_inventory", "Áo thun basic", "L", "Trắng"),
+                (
+                    "initiate_exchange_request",
+                    "ORD-2001",
+                    "ORD-2001-A",
+                    "L",
+                    "Trắng",
+                ),
+            ],
+            calls,
+        )
+        self.assertEqual("EXC-001", result.tool_calls[-1]["observation"]["ticket_id"])
+
+
+class FinalOnlyProvider:
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, prompt, system_prompt=""):
+        self.calls.append(prompt)
+        return "Final Answer: Đã nhận yêu cầu kiểm thử."
+
+
+class ReactSuiteAndTraceTests(unittest.TestCase):
+    def test_suite_runs_only_first_five_cases_in_order(self):
+        provider = FinalOnlyProvider()
+        cases = [
+            {
+                "id": f"TC{index:02d}",
+                "title": f"Case {index}",
+                "user_input": f"Kiểm tra đơn ORD-20{index:02d}.",
+            }
+            for index in range(1, 7)
+        ]
+
+        results = app.run_react_suite(cases, provider, limit=5)
+
+        self.assertEqual(5, len(results))
+        self.assertEqual(
+            [f"TC{index:02d}" for index in range(1, 6)],
+            [result["id"] for result in results],
+        )
+        self.assertEqual(5, len(provider.calls))
+
+    def test_writes_thought_action_observation_markdown(self):
+        def lookup_order(order_id):
+            return {"order_id": order_id, "status": "delivered"}
+
+        provider = ScriptedProvider(
+            [
+                (
+                    "Thought: Cần tra cứu đơn hàng.\n"
+                    "Action: lookup_order[ORD-2001]"
+                ),
+                "Final Answer: Đơn ORD-2001 đã được giao.",
+            ]
+        )
+        case = {
+            "id": "TC01",
+            "title": "Tra cứu đơn",
+            "user_input": "Đơn ORD-2001 giao chưa?",
+        }
+        run_result = app.run_react_agent(
+            case["user_input"],
+            provider,
+            tools={"lookup_order": lookup_order},
+            tool_specs={
+                "lookup_order": {
+                    "required_args": ["order_id"],
+                    "read_only": True,
+                }
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_path = Path(temp_dir) / "trace.md"
+            returned_path = app.write_react_trace_markdown(
+                [case],
+                [
+                    {
+                        "id": case["id"],
+                        "title": case["title"],
+                        "user_input": case["user_input"],
+                        "result": run_result,
+                    }
+                ],
+                trace_path,
+            )
+            markdown = trace_path.read_text(encoding="utf-8")
+
+        self.assertEqual(trace_path, returned_path)
+        self.assertIn("# Mốc 3 Role 4 — ReAct Trace", markdown)
+        self.assertIn("## TC01 — Tra cứu đơn", markdown)
+        self.assertIn("Thought: Cần tra cứu đơn hàng.", markdown)
+        self.assertIn("Action: `lookup_order[ORD-2001]`", markdown)
+        self.assertIn("Observation:", markdown)
+        self.assertIn('"status": "delivered"', markdown)
+        self.assertIn(
+            "Final Answer: Đơn ORD-2001 đã được giao.",
+            markdown,
+        )
+        self.assertIn("Stop reason: `completed`", markdown)
+        self.assertNotIn("OPENAI_API_KEY", markdown)
+        self.assertNotIn("REACT_SYSTEM_PROMPT", markdown)
 
 
 if __name__ == "__main__":
