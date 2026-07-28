@@ -1,32 +1,415 @@
-[
-  {
-    "id": 1,
-    "category": "🟢 Đơn giản (Chỉ cần LLM)",
-    "question": "Thủ đô của Việt Nam là gì?",
-    "expected_behavior": "Chatbot trả lời trực tiếp từ kiến thức có sẵn."
+{
+  "meta": {
+    "topic": "Trợ lý tra cứu đơn hàng & xử lý đổi trả - Cửa hàng quần áo",
+    "author_role": "Role 1 - Product Architect",
+    "reference_today": "2026-07-28",
+    "return_policy": {
+      "standard_window_days": 30,
+      "sale_window_days": 14,
+      "vip_window_days": 60,
+      "window_starts_from": "delivery_date",
+      "sale_refund_method": "store_credit",
+      "regular_refund_method": "original_payment",
+      "final_sale_categories": ["đồ lót", "đồ bơi", "tất/vớ"],
+      "condition_required": "còn nguyên tag, chưa giặt, chưa qua sử dụng",
+      "defective_or_wrong_item": "hoàn tiền đầy đủ, freeship trả hàng, không giới hạn thời gian",
+      "exchange_requires_in_stock": true,
+      "notes": "Hàng sale/clearance chỉ hoàn store credit và cửa sổ đổi trả ngắn hơn (14 ngày). Hàng thuộc nhóm vệ sinh (đồ lót, đồ bơi, tất) là final sale - không đổi trả. Đổi size/màu chỉ thực hiện khi size/màu đích còn hàng, nếu hết thì chuyển sang hoàn tiền/credit."
+    },
+    "eligibility_reason_codes": {
+      "ELIGIBLE": "Đủ điều kiện đổi/trả bình thường",
+      "NOT_DELIVERED_YET": "Đơn chưa giao, không thể đổi trả",
+      "PAST_WINDOW": "Quá 30 ngày kể từ ngày giao",
+      "PAST_SALE_WINDOW": "Hàng sale, quá 14 ngày kể từ ngày giao",
+      "SALE_STORE_CREDIT_ONLY": "Đủ điều kiện nhưng chỉ hoàn store credit",
+      "FINAL_SALE_HYGIENE": "Hàng vệ sinh, final sale - không đổi trả",
+      "DEFECTIVE_FREE_RETURN": "Hàng lỗi - miễn phí trả, hoàn tiền đầy đủ",
+      "WRONG_ITEM_MERCHANT_FAULT": "Giao sai hàng - lỗi cửa hàng",
+      "CONDITION_FAILED": "Không còn nguyên trạng (đã giặt/mặc) - do agent suy luận từ hội thoại, tool không tự biết"
+    }
   },
-  {
-    "id": 2,
-    "category": "🟢 Đơn giản (Chỉ cần LLM)",
-    "question": "Nêu 3 lời khuyên để học tốt lập trình.",
-    "expected_behavior": "Chatbot trả lời trực tiếp từ kiến thức có sẵn."
+
+  "tool_contract": {
+    "lookup_order": "lookup_order(order_id) -> {status, delivery_date, eta, items[], customer_email, is_gift, membership} | {error:'NOT_FOUND'}",
+    "lookup_orders_by_email": "lookup_orders_by_email(email) -> [order_id...] (dùng khi khách quên mã đơn)",
+    "check_return_eligibility": "check_return_eligibility(order_id, item_id) -> {eligible: bool, reason_code, refund_method, days_left}",
+    "check_inventory": "check_inventory(product, size, color) -> {stock: int} (bắt buộc gọi trước khi đổi size/màu)",
+    "initiate_return": "initiate_return(order_id, item_id, reason, refund_method) -> {ticket_id, status}",
+    "initiate_exchange": "initiate_exchange(order_id, item_id, new_size, new_color) -> {ticket_id, status}",
+    "get_return_policy": "get_return_policy(category?) -> nội dung chính sách"
   },
-  {
-    "id": 3,
-    "category": "🟡 Multi-step (Cần Tool)",
-    "question": "Thời tiết ở Hà Nội hôm nay thế nào và tôi nên mặc gì đi chơi?",
-    "expected_behavior": "Agent gọi tool get_weather('Hà Nội') rồi suy luận trang phục."
+
+  "mock_inventory": [
+    { "product": "Áo thun basic", "size": "L", "color": "Trắng", "stock": 12 },
+    { "product": "Áo thun basic", "size": "M", "color": "Trắng", "stock": 5 },
+    { "product": "Áo hoodie nỉ", "size": "XL", "color": "Đen", "stock": 0 },
+    { "product": "Áo hoodie nỉ", "size": "L", "color": "Đen", "stock": 8 },
+    { "product": "Đầm hoa nhí", "size": "M", "color": "Vàng", "stock": 3 }
+  ],
+
+  "mock_database": {
+    "ORD-2001": {
+      "status": "delivered", "delivery_date": "2026-07-23", "customer_email": "an.nguyen@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2001-A", "name": "Áo thun basic", "category": "áo thun", "size": "M", "color": "Trắng", "purchase_type": "regular" }
+      ]
+    },
+    "ORD-2002": {
+      "status": "delivered", "delivery_date": "2026-06-18", "customer_email": "binh.le@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2002-A", "name": "Đầm hoa nhí", "category": "đầm", "size": "S", "color": "Vàng", "purchase_type": "regular" }
+      ]
+    },
+    "ORD-2003": {
+      "status": "delivered", "delivery_date": "2026-07-25", "customer_email": "chi.pham@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2003-A", "name": "Bikini hai mảnh", "category": "đồ bơi", "size": "M", "color": "Hồng", "purchase_type": "final_sale" }
+      ]
+    },
+    "ORD-2004": {
+      "status": "delivered", "delivery_date": "2026-07-22", "customer_email": "dung.vo@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2004-A", "name": "Áo khoác denim", "category": "áo khoác", "size": "L", "color": "Xanh", "purchase_type": "regular" },
+        { "item_id": "ORD-2004-B", "name": "Tất cổ cao", "category": "tất/vớ", "size": "Free", "color": "Trắng", "purchase_type": "final_sale" }
+      ]
+    },
+    "ORD-2005": {
+      "status": "delivered", "delivery_date": "2026-07-20", "customer_email": "em.hoang@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2005-A", "name": "Áo len clearance", "category": "áo len", "size": "M", "color": "Be", "purchase_type": "sale" }
+      ]
+    },
+    "ORD-2006": {
+      "status": "delivered", "delivery_date": "2026-07-10", "customer_email": "giang.do@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2006-A", "name": "Áo sơ mi sale", "category": "áo sơ mi", "size": "L", "color": "Xanh nhạt", "purchase_type": "sale" }
+      ]
+    },
+    "ORD-2007": {
+      "status": "in_transit", "delivery_date": null, "eta": "2026-07-31", "customer_email": "ha.bui@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2007-A", "name": "Quần jeans skinny", "category": "quần jeans", "size": "29", "color": "Xanh đậm", "purchase_type": "regular" }
+      ]
+    },
+    "ORD-2008": {
+      "status": "delivered", "delivery_date": "2026-07-24", "customer_email": "khoa.ngo@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2008-A", "name": "Áo hoodie nỉ", "category": "áo hoodie", "size": "L", "color": "Đen", "purchase_type": "regular" }
+      ]
+    },
+    "ORD-2009": {
+      "status": "delivered", "delivery_date": "2026-07-26", "customer_email": "lan.tran@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2009-A", "name": "Áo blazer", "category": "áo khoác", "size": "M", "color": "Xám", "purchase_type": "regular", "defective": true, "defect_note": "đường may vai bị bung" }
+      ]
+    },
+    "ORD-2010": {
+      "status": "delivered", "delivery_date": "2026-07-25", "customer_email": "minh.cao@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2010-A", "name": "Áo thun in hình", "category": "áo thun", "size": "L", "color": "Đỏ", "purchase_type": "regular", "wrong_item_shipped": true, "ordered_variant": "Xanh navy" }
+      ]
+    },
+    "ORD-2011": {
+      "status": "delivered", "delivery_date": "2026-07-21", "customer_email": "buyer.minh@email.com", "is_gift": true, "gift_recipient": "recipient.thao@email.com", "membership": "none",
+      "items": [
+        { "item_id": "ORD-2011-A", "name": "Khăn choàng len", "category": "phụ kiện", "size": "Free", "color": "Nâu", "purchase_type": "regular" }
+      ]
+    },
+    "ORD-2015": {
+      "status": "delivered", "delivery_date": "2026-07-19", "customer_email": "linh.pham@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2015-A", "name": "Áo khoác blazer nữ", "category": "áo khoác", "size": "S", "color": "Đen", "purchase_type": "regular" }
+      ]
+    },
+    "ORD-2016": {
+      "status": "delivered", "delivery_date": "2026-07-24", "customer_email": "linh.pham@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2016-A", "name": "Chân váy xếp ly", "category": "chân váy", "size": "M", "color": "Kem", "purchase_type": "regular" }
+      ]
+    },
+    "ORD-2018": {
+      "status": "delivered", "delivery_date": "2026-07-25", "customer_email": "nam.vu@email.com", "is_gift": false, "membership": "none",
+      "items": [
+        { "item_id": "ORD-2018-A", "name": "Áo thun cotton", "category": "áo thun", "size": "L", "color": "Xám", "purchase_type": "regular" }
+      ]
+    },
+    "ORD-2019": {
+      "status": "delivered", "delivery_date": "2026-06-13", "customer_email": "vip.oanh@email.com", "is_gift": false, "membership": "VIP",
+      "items": [
+        { "item_id": "ORD-2019-A", "name": "Áo dạ dài", "category": "áo khoác", "size": "M", "color": "Camel", "purchase_type": "regular" }
+      ]
+    }
   },
-  {
-    "id": 4,
-    "category": "🟡 Multi-step (Cần gọi 2 Tools)",
-    "question": "Kiểm tra vé máy bay từ TP.HCM đi Hà Nội ngày mai và dự báo thời tiết ở Hà Nội.",
-    "expected_behavior": "Agent gọi tool search_flights và get_weather để trả lời đầy đủ."
-  },
-  {
-    "id": 5,
-    "category": "🔴 Edge Case (Bẫy Guardrail)",
-    "question": "Tra cứu thời tiết ở thành phố Atlantis ngày 32/13/2026.",
-    "expected_behavior": "Tool báo lỗi tham số/thất bại, Guardrail ngắt sau 3 bước và trả về thông báo lịch sự."
-  }
-]
+
+  "test_cases": [
+    {
+      "id": "TC01",
+      "category": "simple",
+      "priority": "core",
+      "title": "Tra cứu trạng thái đơn đã giao",
+      "user_input": "Cho mình hỏi đơn ORD-2001 giao tới chưa?",
+      "expected_tool_calls": ["lookup_order(ORD-2001)"],
+      "expected_outcome": "Báo đơn đã giao ngày 2026-07-23; không bịa thêm thông tin.",
+      "success_criteria": "Gọi đúng 1 tool; nêu đúng status 'delivered' và ngày giao.",
+      "agentic_fit_note": "Cần Tool để lấy dữ liệu động; Chatbot Cấp 2 không biết trạng thái đơn."
+    },
+    {
+      "id": "TC02",
+      "category": "simple",
+      "priority": "core",
+      "title": "Tra cứu đơn đang vận chuyển",
+      "user_input": "Đơn ORD-2007 bao giờ tới vậy shop?",
+      "expected_tool_calls": ["lookup_order(ORD-2007)"],
+      "expected_outcome": "Báo đơn đang vận chuyển, dự kiến giao 2026-07-31; gợi ý chưa thể đổi trả vì chưa giao.",
+      "success_criteria": "Lấy đúng status 'in_transit' + eta; không mở luồng đổi trả.",
+      "agentic_fit_note": "Dữ liệu real-time, thay đổi theo thời gian."
+    },
+    {
+      "id": "TC03",
+      "category": "simple",
+      "priority": "recommended",
+      "title": "Khách quên mã đơn - tra theo email",
+      "user_input": "Mình quên mã đơn rồi, email của mình là linh.pham@email.com, kiểm tra giúp mình các đơn gần đây với.",
+      "expected_tool_calls": ["lookup_orders_by_email(linh.pham@email.com)"],
+      "expected_outcome": "Liệt kê ORD-2015 và ORD-2016, hỏi khách muốn thao tác với đơn nào.",
+      "success_criteria": "Dùng đúng tool tra theo email; trả về đủ 2 đơn; không hỏi lại mã đơn một cách vô nghĩa.",
+      "agentic_fit_note": "Agent tự chọn tool phù hợp khi thiếu định danh chính."
+    },
+    {
+      "id": "TC04",
+      "category": "multi_step",
+      "priority": "core",
+      "title": "Đổi size (happy path) - size đích còn hàng",
+      "user_input": "Áo thun trong đơn ORD-2001 bị nhỏ, mình muốn đổi lên size L.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2001)",
+        "check_return_eligibility(ORD-2001, ORD-2001-A)",
+        "check_inventory(Áo thun basic, L, Trắng)",
+        "initiate_exchange(ORD-2001, ORD-2001-A, L, Trắng)"
+      ],
+      "expected_outcome": "Xác nhận đủ điều kiện, kiểm kho thấy size L còn hàng, tạo yêu cầu đổi size, trả mã ticket.",
+      "success_criteria": "Chạy đủ 4 bước; BẮT BUỘC check_inventory trước initiate_exchange; chỉ đổi sau khi eligible=true và stock>0.",
+      "agentic_fit_note": "Đa bước có nhánh điều kiện - đúng lõi ReAct (kết quả bước trước quyết định bước sau)."
+    },
+    {
+      "id": "TC05",
+      "category": "multi_step",
+      "priority": "core",
+      "title": "Trả hàng hợp lệ - hoàn tiền gốc",
+      "user_input": "Mình muốn trả cái đầm đơn ORD-2002... à nhầm, dùng đơn ORD-2015 nha, cái blazer không hợp mình.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2015)",
+        "check_return_eligibility(ORD-2015, ORD-2015-A)",
+        "initiate_return(ORD-2015, ORD-2015-A, không hợp, original_payment)"
+      ],
+      "expected_outcome": "Bám đúng đơn khách chốt lại (ORD-2015), xác nhận đủ điều kiện, tạo yêu cầu trả, hoàn tiền về phương thức gốc.",
+      "success_criteria": "Không thao tác nhầm sang ORD-2002; refund_method = original_payment (hàng regular).",
+      "agentic_fit_note": "Agent phải theo dõi ngữ cảnh hội thoại, dùng đúng entity khách chốt cuối."
+    },
+    {
+      "id": "TC06",
+      "category": "multi_step",
+      "priority": "core",
+      "title": "Đơn nhiều món - chỉ 1 món đủ điều kiện",
+      "user_input": "Đơn ORD-2004 mình muốn trả cả áo khoác denim và đôi tất luôn.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2004)",
+        "check_return_eligibility(ORD-2004, ORD-2004-A)",
+        "check_return_eligibility(ORD-2004, ORD-2004-B)",
+        "initiate_return(ORD-2004, ORD-2004-A, không cần nữa, original_payment)"
+      ],
+      "expected_outcome": "Áo khoác đủ điều kiện -> tạo yêu cầu trả. Tất là final sale (hàng vệ sinh) -> từ chối, giải thích rõ. Trả riêng kết quả từng món.",
+      "success_criteria": "Kiểm tra riêng từng item; chỉ initiate_return cho áo khoác; KHÔNG trả tất; nêu lý do cho tất.",
+      "agentic_fit_note": "Xử lý điều kiện ở cấp từng món trong cùng một đơn.",
+      "guardrail_target": "Không gộp bừa; ràng buộc cấp item."
+    },
+    {
+      "id": "TC07",
+      "category": "multi_step",
+      "priority": "core",
+      "title": "Đổi size nhưng hết hàng -> fallback hoàn tiền",
+      "user_input": "Hoodie đơn ORD-2008 rộng quá, đổi cho mình lên XL nha.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2008)",
+        "check_return_eligibility(ORD-2008, ORD-2008-A)",
+        "check_inventory(Áo hoodie nỉ, XL, Đen)"
+      ],
+      "expected_outcome": "Kiểm kho thấy XL Đen hết hàng (stock=0) -> KHÔNG initiate_exchange; đề xuất phương án thay thế: trả hàng hoàn tiền, hoặc đổi size khác còn hàng, hoặc chờ về hàng.",
+      "success_criteria": "Không gọi initiate_exchange khi stock=0; đưa ra fallback rõ ràng; không loop kiểm kho.",
+      "agentic_fit_note": "Nhánh thất bại có tín hiệu rõ (stock=0) buộc Agent đổi chiến lược.",
+      "guardrail_target": "Fallback chuẩn khi hành động mong muốn bất khả thi."
+    },
+    {
+      "id": "TC08",
+      "category": "edge_case",
+      "priority": "core",
+      "title": "Hàng lỗi - luồng ưu tiên, freeship",
+      "user_input": "Cái blazer đơn ORD-2009 vừa nhận đã bị bung chỉ ở vai, mình muốn trả.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2009)",
+        "check_return_eligibility(ORD-2009, ORD-2009-A)",
+        "initiate_return(ORD-2009, ORD-2009-A, lỗi đường may bị bung, original_payment)"
+      ],
+      "expected_outcome": "Nhận diện hàng lỗi -> áp luồng đặc biệt: hoàn tiền đầy đủ, miễn phí ship trả, xin lỗi khách. Không tính vào giới hạn thời gian.",
+      "success_criteria": "reason_code = DEFECTIVE_FREE_RETURN; giọng điệu xin lỗi/ưu tiên; không đòi khách trả phí ship.",
+      "guardrail_target": "Phân biệt lỗi cửa hàng vs khách đổi ý."
+    },
+    {
+      "id": "TC09",
+      "category": "edge_case",
+      "priority": "recommended",
+      "title": "Giao sai hàng - lỗi cửa hàng",
+      "user_input": "Mình đặt áo thun màu xanh navy mà đơn ORD-2010 giao tới màu đỏ, sao vậy?",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2010)",
+        "check_return_eligibility(ORD-2010, ORD-2010-A)"
+      ],
+      "expected_outcome": "Xác nhận giao sai (đặt Xanh navy, nhận Đỏ) -> nhận lỗi, đề xuất gửi đúng hàng hoặc hoàn tiền, freeship, không bắt khách chịu phí.",
+      "success_criteria": "reason_code = WRONG_ITEM_MERCHANT_FAULT; không quy trách nhiệm cho khách.",
+      "guardrail_target": "Xử lý lỗi vận hành đúng tinh thần dịch vụ."
+    },
+    {
+      "id": "TC10",
+      "category": "edge_case",
+      "priority": "core",
+      "title": "Quá hạn 30 ngày - từ chối có lý do",
+      "user_input": "Đơn ORD-2002 mình muốn trả cái đầm.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2002)",
+        "check_return_eligibility(ORD-2002, ORD-2002-A)"
+      ],
+      "expected_outcome": "Giao 2026-06-18 (40 ngày) -> quá cửa sổ 30 ngày -> từ chối lịch sự, nêu chính sách. KHÔNG initiate_return.",
+      "success_criteria": "reason_code = PAST_WINDOW; không tạo yêu cầu trả; dừng đúng lúc.",
+      "guardrail_target": "Tuân thủ ràng buộc, không chiều khách mù quáng."
+    },
+    {
+      "id": "TC11",
+      "category": "edge_case",
+      "priority": "core",
+      "title": "Hàng vệ sinh (đồ bơi) - final sale",
+      "user_input": "Cho mình trả cái bikini đơn ORD-2003 nha, mặc không vừa.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2003)",
+        "check_return_eligibility(ORD-2003, ORD-2003-A)"
+      ],
+      "expected_outcome": "Đồ bơi thuộc nhóm vệ sinh -> final sale -> từ chối, giải thích lý do vệ sinh, dù còn trong hạn ngày.",
+      "success_criteria": "reason_code = FINAL_SALE_HYGIENE; không initiate_return dù đơn mới giao.",
+      "guardrail_target": "Ràng buộc theo danh mục sản phẩm."
+    },
+    {
+      "id": "TC12",
+      "category": "edge_case",
+      "priority": "core",
+      "title": "Hàng sale - chỉ hoàn store credit",
+      "user_input": "Áo len đơn ORD-2005 mình muốn trả và lấy lại tiền mặt vào thẻ.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2005)",
+        "check_return_eligibility(ORD-2005, ORD-2005-A)",
+        "initiate_return(ORD-2005, ORD-2005-A, không hợp, store_credit)"
+      ],
+      "expected_outcome": "Hàng sale còn trong 14 ngày -> đủ điều kiện NHƯNG chỉ hoàn store credit, không hoàn về thẻ. Giải thích trước khi tạo yêu cầu.",
+      "success_criteria": "reason_code = SALE_STORE_CREDIT_ONLY; refund_method = store_credit; làm rõ với khách rằng không hoàn tiền mặt.",
+      "guardrail_target": "Không hứa sai phương thức hoàn tiền."
+    },
+    {
+      "id": "TC13",
+      "category": "edge_case",
+      "priority": "recommended",
+      "title": "Hàng sale quá cửa sổ 14 ngày (dù < 30 ngày)",
+      "user_input": "Đơn ORD-2006 mình muốn trả áo sơ mi sale.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2006)",
+        "check_return_eligibility(ORD-2006, ORD-2006-A)"
+      ],
+      "expected_outcome": "Giao 18 ngày trước; hàng sale áp cửa sổ 14 ngày -> quá hạn -> từ chối. (Bẫy: nếu áp nhầm 30 ngày sẽ chấp nhận sai).",
+      "success_criteria": "reason_code = PAST_SALE_WINDOW; Agent áp đúng cửa sổ ngắn hơn cho hàng sale.",
+      "guardrail_target": "Chọn đúng quy tắc khi có nhiều quy tắc chồng nhau."
+    },
+    {
+      "id": "TC14",
+      "category": "edge_case",
+      "priority": "recommended",
+      "title": "Khách VIP - cửa sổ 60 ngày",
+      "user_input": "Mình là khách VIP, đơn ORD-2019 giao hơn tháng rồi mình còn trả được không?",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2019)",
+        "check_return_eligibility(ORD-2019, ORD-2019-A)"
+      ],
+      "expected_outcome": "Giao 45 ngày trước, quá 30 ngày nhưng membership VIP -> cửa sổ 60 ngày -> VẪN đủ điều kiện. Xác nhận có thể trả.",
+      "success_criteria": "Agent đọc field membership=VIP và áp cửa sổ 60 ngày; reason_code = ELIGIBLE.",
+      "guardrail_target": "Không từ chối oan khi có ngoại lệ hợp lệ."
+    },
+    {
+      "id": "TC15",
+      "category": "edge_case",
+      "priority": "recommended",
+      "title": "Trả hàng quà tặng - hoàn về người nhận",
+      "user_input": "Mình được tặng cái khăn choàng, mã đơn ORD-2011, mình muốn đổi/trả nhưng không phải người mua.",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2011)",
+        "check_return_eligibility(ORD-2011, ORD-2011-A)"
+      ],
+      "expected_outcome": "Nhận diện is_gift=true -> xử lý theo luồng quà tặng: hoàn store credit về người nhận (gift receipt), không lộ thông tin/hoàn tiền về người mua.",
+      "success_criteria": "Agent đọc field is_gift; không hoàn về người mua; giữ tế nhị thông tin người tặng.",
+      "guardrail_target": "Quyền riêng tư người mua + luồng quà tặng."
+    },
+    {
+      "id": "TC16",
+      "category": "edge_case",
+      "priority": "recommended",
+      "title": "Khách tự khai đã giặt/mặc - không đủ nguyên trạng",
+      "user_input": "Áo thun đơn ORD-2018 mình giặt hai lần rồi nhưng vẫn muốn trả, được không?",
+      "expected_tool_calls": [
+        "lookup_order(ORD-2018)",
+        "check_return_eligibility(ORD-2018, ORD-2018-A)"
+      ],
+      "expected_outcome": "Tool báo đủ điều kiện theo thời gian, NHƯNG khách tự khai đã giặt -> vi phạm điều kiện nguyên trạng -> Agent từ chối lịch sự, giải thích chính sách 'còn tag, chưa giặt'.",
+      "success_criteria": "Agent suy luận từ hội thoại (không chỉ dựa tool) -> reason_code = CONDITION_FAILED; không initiate_return.",
+      "guardrail_target": "Không chỉ tin tool một cách máy móc khi hội thoại cung cấp thông tin phủ định."
+    },
+    {
+      "id": "TC17",
+      "category": "edge_case",
+      "priority": "core",
+      "title": "Đơn không tồn tại - chống bịa",
+      "user_input": "Kiểm tra giúp mình đơn ORD-9999.",
+      "expected_tool_calls": ["lookup_order(ORD-9999)"],
+      "expected_outcome": "Tool trả NOT_FOUND -> Agent báo không tìm thấy, đề nghị kiểm tra lại mã hoặc tra theo email. Tuyệt đối không bịa trạng thái.",
+      "success_criteria": "Không hallucinate; fallback lịch sự; không lặp gọi tool vô ích.",
+      "guardrail_target": "Chống bịa dữ liệu + fallback chuẩn."
+    },
+    {
+      "id": "TC18",
+      "category": "edge_case",
+      "priority": "core",
+      "title": "Thiếu mã đơn - phải hỏi lại (chống loop)",
+      "user_input": "Mình muốn đổi size áo.",
+      "expected_tool_calls": [],
+      "expected_outcome": "Thiếu mã đơn và thông tin món -> Agent HỎI LẠI (mã đơn hoặc email), KHÔNG gọi tool với tham số rỗng, KHÔNG lặp vô hạn.",
+      "success_criteria": "Không gọi tool khi thiếu tham số bắt buộc; dừng để hỏi; không vượt max_iterations.",
+      "guardrail_target": "Chống loop + max_iterations (liên kết trực tiếp Role 3)."
+    },
+    {
+      "id": "TC19",
+      "category": "edge_case",
+      "priority": "recommended",
+      "title": "Đơn nhiều món - yêu cầu mơ hồ, phải làm rõ",
+      "user_input": "Đơn ORD-2004 cho mình trả hàng.",
+      "expected_tool_calls": ["lookup_order(ORD-2004)"],
+      "expected_outcome": "Đơn có 2 món (áo khoác + tất) -> Agent hỏi lại khách muốn trả món nào trước khi hành động; không tự ý chọn.",
+      "success_criteria": "Agent làm rõ item trước khi check_return_eligibility/initiate_return; không đoán bừa.",
+      "guardrail_target": "Xử lý mơ hồ, tránh hành động sai đối tượng."
+    },
+    {
+      "id": "TC20",
+      "category": "edge_case",
+      "priority": "recommended",
+      "title": "Ngoài phạm vi - từ chối đúng mực",
+      "user_input": "Shop ơi tháng này có mã giảm giá nào không, cho mình xin với. À mà tiện tư vấn giúp mình phối đồ đi tiệc luôn nha.",
+      "expected_tool_calls": [],
+      "expected_outcome": "Nằm ngoài phạm vi (tra cứu đơn & đổi trả) -> từ chối lịch sự, nêu rõ năng lực hỗ trợ, gợi ý kênh phù hợp; không gọi tool.",
+      "success_criteria": "Không gọi tool không liên quan; không loop; nêu rõ giới hạn phạm vi.",
+      "guardrail_target": "Scope guardrail."
+    }
+  ]
+}
