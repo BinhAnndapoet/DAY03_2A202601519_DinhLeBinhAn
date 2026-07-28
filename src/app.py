@@ -68,6 +68,35 @@ def run_baseline_chatbot(user_query: str, provider):
     return response
 
 
+def run_baseline_suite(test_cases, provider, limit=5):
+    """Chạy Chatbot Baseline trên một số test case đầu tiên."""
+    selected_cases = test_cases[:limit]
+    results = []
+
+    for index, case in enumerate(selected_cases, start=1):
+        case_id = case.get("id", f"case-{index}")
+        title = case.get("title", "Không có tiêu đề")
+        user_query = case["user_input"]
+
+        print(f"\n{'=' * 60}")
+        print(
+            f"🧪 BASELINE CASE {index}/{len(selected_cases)}: "
+            f"{case_id} — {title}"
+        )
+        print(f"{'=' * 60}")
+
+        response = run_baseline_chatbot(user_query, provider)
+        results.append(
+            {
+                "id": case_id,
+                "title": title,
+                "response": response,
+            }
+        )
+
+    return results
+
+
 if __name__ == "__main__":
     print("==================================================")
     print("🏫 ĐẠI HỌC VINUNI - BÀI LAB 3: CHATBOT VS REACT AGENT")

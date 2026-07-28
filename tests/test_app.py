@@ -106,5 +106,30 @@ class BaselineChatbotTests(unittest.TestCase):
         )
 
 
+class BaselineSuiteTests(unittest.TestCase):
+    def test_runs_only_first_five_cases_in_order(self):
+        provider = FakeProvider()
+        cases = [
+            {
+                "id": f"TC{index:02d}",
+                "title": f"Case {index}",
+                "user_input": f"question {index}",
+            }
+            for index in range(1, 7)
+        ]
+
+        results = app.run_baseline_suite(cases, provider, limit=5)
+
+        self.assertEqual(5, len(results))
+        self.assertEqual(
+            [f"question {index}" for index in range(1, 6)],
+            [call["prompt"] for call in provider.calls],
+        )
+        self.assertEqual(
+            [f"TC{index:02d}" for index in range(1, 6)],
+            [result["id"] for result in results],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
