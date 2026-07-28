@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -129,6 +130,27 @@ class BaselineSuiteTests(unittest.TestCase):
             [f"TC{index:02d}" for index in range(1, 6)],
             [result["id"] for result in results],
         )
+
+
+class AppSmokeTests(unittest.TestCase):
+    def test_main_runs_five_baseline_cases_with_mock_provider(self):
+        environment = os.environ.copy()
+        environment["LLM_PROVIDER"] = "mock"
+        environment["PYTHONIOENCODING"] = "utf-8"
+
+        result = subprocess.run(
+            [sys.executable, "src/app.py"],
+            cwd=PROJECT_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Đã tải 20 test cases", result.stdout)
+        self.assertEqual(5, result.stdout.count("🧪 BASELINE CASE"))
+        self.assertNotIn("[REACT AGENT]", result.stdout)
 
 
 if __name__ == "__main__":

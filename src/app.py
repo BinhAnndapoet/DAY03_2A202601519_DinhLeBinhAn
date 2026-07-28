@@ -24,6 +24,9 @@ from providers import get_llm_provider
 
 load_dotenv()
 
+BASELINE_CASE_LIMIT = 5
+
+
 def load_test_cases(config_path=None):
     """Đọc và xác thực bộ test case do Role 1 cung cấp."""
     if config_path is None:
@@ -97,21 +100,30 @@ def run_baseline_suite(test_cases, provider, limit=5):
     return results
 
 
-if __name__ == "__main__":
-    print("==================================================")
-    print("🏫 ĐẠI HỌC VINUNI - BÀI LAB 3: CHATBOT VS REACT AGENT")
-    print("==================================================")
-    
-    # Khởi tạo Multi-Provider LLM Adapter (Đọc từ biến môi trường LLM_PROVIDER)
+def main():
+    """Khởi chạy mốc 2 của Role 4 với Chatbot Baseline."""
+    print("=" * 60)
+    print("🏫 ĐẠI HỌC VINUNI - MỐC 2: CHATBOT BASELINE")
+    print("=" * 60)
+
     provider = get_llm_provider()
     model_name = getattr(provider, "model_name", "Offline Mock Mode")
-    print(f"🔌 LLM Provider đang hoạt động: {provider.__class__.__name__} (Model: {model_name})")
-    
-    tests = load_test_cases()
-    print(f"✅ Đã tải thành công {len(tests)} Test Cases từ config/test_cases.json\n")
-    
-    # Chạy thử câu test số 3
-    sample_query = tests[2]["question"]
-    
-    print("--- DEMO 1: CHẠY TRÊN CHATBOT BASELINE ---")
-    run_baseline_chatbot(sample_query, provider)
+    print(
+        f"🔌 LLM Provider đang hoạt động: "
+        f"{provider.__class__.__name__} (Model: {model_name})"
+    )
+
+    test_cases = load_test_cases()
+    print(
+        f"✅ Đã tải {len(test_cases)} test cases; "
+        f"chạy {BASELINE_CASE_LIMIT} case đầu bằng Chatbot Baseline."
+    )
+    return run_baseline_suite(
+        test_cases,
+        provider,
+        limit=BASELINE_CASE_LIMIT,
+    )
+
+
+if __name__ == "__main__":
+    main()
