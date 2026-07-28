@@ -24,17 +24,35 @@ from providers import get_llm_provider
 
 load_dotenv()
 
-def load_test_cases():
-    """Đọc bộ test cases từ config/test_cases.json của Role 1"""
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    config_path = os.path.join(base_dir, "config", "test_cases.json")
-    
-    # Fallback kiểm tra nếu file ở thư mục hiện tại
-    if not os.path.exists(config_path):
-        config_path = "test_cases.json"
-        
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_test_cases(config_path=None):
+    """Đọc và xác thực bộ test case do Role 1 cung cấp."""
+    if config_path is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config_path = os.path.join(base_dir, "config", "test_cases.json")
+
+    with open(config_path, "r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    test_cases = data.get("test_cases") if isinstance(data, dict) else None
+    if not isinstance(test_cases, list):
+        raise ValueError(
+            "config/test_cases.json must contain a 'test_cases' list"
+        )
+
+    for index, case in enumerate(test_cases, start=1):
+        if isinstance(case, dict):
+            case_id = case.get("id", f"case #{index}")
+            user_input = case.get("user_input")
+        else:
+            case_id = f"case #{index}"
+            user_input = None
+
+        if not isinstance(user_input, str) or not user_input.strip():
+            raise ValueError(
+                f"{case_id} must contain a non-empty 'user_input'"
+            )
+
+    return test_cases
 
 
 def run_baseline_chatbot(user_query: str, provider):
