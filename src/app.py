@@ -18,24 +18,44 @@ if sys.stdout.encoding != 'utf-8':
     except Exception:
         pass
 
-# Import các thành phần từ file của Role 2, Role 3 & Multi-Provider Adapter
-from tools import AVAILABLE_TOOLS, get_weather, search_flights
-from prompts import CHATBOT_BASELINE_PROMPT, REACT_SYSTEM_PROMPT, MAX_ITERATIONS
+# Import prompt của Role 3 và Multi-Provider Adapter
+from prompts import CHATBOT_BASELINE_PROMPT
 from providers import get_llm_provider
 
 load_dotenv()
 
-def load_test_cases():
-    """Đọc bộ test cases từ config/test_cases.json của Role 1"""
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    config_path = os.path.join(base_dir, "config", "test_cases.json")
-    
-    # Fallback kiểm tra nếu file ở thư mục hiện tại
-    if not os.path.exists(config_path):
-        config_path = "test_cases.json"
-        
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+BASELINE_CASE_LIMIT = 5
+
+
+def load_test_cases(config_path=None):
+    """Đọc và xác thực bộ test case do Role 1 cung cấp."""
+    if config_path is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config_path = os.path.join(base_dir, "config", "test_cases.json")
+
+    with open(config_path, "r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    test_cases = data.get("test_cases") if isinstance(data, dict) else None
+    if not isinstance(test_cases, list):
+        raise ValueError(
+            "config/test_cases.json must contain a 'test_cases' list"
+        )
+
+    for index, case in enumerate(test_cases, start=1):
+        if isinstance(case, dict):
+            case_id = case.get("id", f"case #{index}")
+            user_input = case.get("user_input")
+        else:
+            case_id = f"case #{index}"
+            user_input = None
+
+        if not isinstance(user_input, str) or not user_input.strip():
+            raise ValueError(
+                f"{case_id} must contain a non-empty 'user_input'"
+            )
+
+    return test_cases
 
 
 def run_baseline_chatbot(user_query: str, provider):
@@ -48,54 +68,62 @@ def run_baseline_chatbot(user_query: str, provider):
     # Gọi LLM Provider thực hiện sinh câu trả lời
     response = provider.generate(user_query, system_prompt=CHATBOT_BASELINE_PROMPT)
     print(f"🤖 Chatbot trả lời:\n{response}")
+    return response
 
 
-def run_react_agent(user_query: str, provider):
-    """
-    Dựng vòng lặp ReAct Agent (Thought -> Action -> Observation) có Guardrails.
-    """
-    print(f"\n🤖 [REACT AGENT] Câu hỏi: {user_query}")
-    step = 0
-    
-    while step < MAX_ITERATIONS:
-        step += 1
-        print(f"\n--- 🔄 Vòng lặp ReAct (Step {step}/{MAX_ITERATIONS}) ---")
-        
-        if step == 1:
-            print("🧠 Thought: Câu hỏi này cần tra cứu thời tiết thời gian thực.")
-            print("🛠️ Action: get_weather['Hà Nội']")
-            
-            # Thực thi tool
-            obs = get_weather("Hà Nội")
-            print(f"👁️ Observation: {obs}")
-            
-        elif step == 2:
-            print("🧠 Thought: Tôi đã có thông tin thời tiết Hà Nội, giờ tôi có thể tư vấn trang phục.")
-            print("🏁 Final Answer: Thời tiết Hà Nội hôm nay 28°C, nắng nhẹ. Bạn nên mặc áo phông thoáng mát!")
-            break
-            
-    if step >= MAX_ITERATIONS:
-        print(f"🛡️ GUARDRAIL TRIGGERED: Đã đạt giới hạn tối đa {MAX_ITERATIONS} bước. Ngắt lặp an toàn!")
+def run_baseline_suite(test_cases, provider, limit=5):
+    """Chạy Chatbot Baseline trên một số test case đầu tiên."""
+    selected_cases = test_cases[:limit]
+    results = []
+
+    for index, case in enumerate(selected_cases, start=1):
+        case_id = case.get("id", f"case-{index}")
+        title = case.get("title", "Không có tiêu đề")
+        user_query = case["user_input"]
+
+        print(f"\n{'=' * 60}")
+        print(
+            f"🧪 BASELINE CASE {index}/{len(selected_cases)}: "
+            f"{case_id} — {title}"
+        )
+        print(f"{'=' * 60}")
+
+        response = run_baseline_chatbot(user_query, provider)
+        results.append(
+            {
+                "id": case_id,
+                "title": title,
+                "response": response,
+            }
+        )
+
+    return results
+
+
+def main():
+    """Khởi chạy mốc 2 của Role 4 với Chatbot Baseline."""
+    print("=" * 60)
+    print("🏫 ĐẠI HỌC VINUNI - MỐC 2: CHATBOT BASELINE")
+    print("=" * 60)
+
+    provider = get_llm_provider()
+    model_name = getattr(provider, "model_name", "Offline Mock Mode")
+    print(
+        f"🔌 LLM Provider đang hoạt động: "
+        f"{provider.__class__.__name__} (Model: {model_name})"
+    )
+
+    test_cases = load_test_cases()
+    print(
+        f"✅ Đã tải {len(test_cases)} test cases; "
+        f"chạy {BASELINE_CASE_LIMIT} case đầu bằng Chatbot Baseline."
+    )
+    return run_baseline_suite(
+        test_cases,
+        provider,
+        limit=BASELINE_CASE_LIMIT,
+    )
 
 
 if __name__ == "__main__":
-    print("==================================================")
-    print("🏫 ĐẠI HỌC VINUNI - BÀI LAB 3: CHATBOT VS REACT AGENT")
-    print("==================================================")
-    
-    # Khởi tạo Multi-Provider LLM Adapter (Đọc từ biến môi trường LLM_PROVIDER)
-    provider = get_llm_provider()
-    model_name = getattr(provider, "model_name", "Offline Mock Mode")
-    print(f"🔌 LLM Provider đang hoạt động: {provider.__class__.__name__} (Model: {model_name})")
-    
-    tests = load_test_cases()
-    print(f"✅ Đã tải thành công {len(tests)} Test Cases từ config/test_cases.json\n")
-    
-    # Chạy thử câu test số 3
-    sample_query = tests[2]["question"]
-    
-    print("--- DEMO 1: CHẠY TRÊN CHATBOT BASELINE ---")
-    run_baseline_chatbot(sample_query, provider)
-    
-    print("\n--- DEMO 2: CHẠY TRÊN REACT AGENT ---")
-    run_react_agent(sample_query, provider)
+    main()
