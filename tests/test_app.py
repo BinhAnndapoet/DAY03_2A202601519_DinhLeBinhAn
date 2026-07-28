@@ -32,6 +32,9 @@ class AppImportTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_app_does_not_expose_legacy_tool_registry(self):
+        self.assertFalse(hasattr(app, "AVAILABLE_TOOLS"))
+
 
 class LoadTestCasesTests(unittest.TestCase):
     def test_loads_current_twenty_case_contract(self):
@@ -83,6 +86,11 @@ class FakeProvider:
         return f"fake response: {prompt}"
 
 
+class ExplodingProvider:
+    def generate(self, prompt, system_prompt=""):
+        raise RuntimeError("provider unavailable")
+
+
 class BaselineChatbotTests(unittest.TestCase):
     def test_calls_provider_once_without_tools_and_returns_response(self):
         provider = FakeProvider()
@@ -105,6 +113,16 @@ class BaselineChatbotTests(unittest.TestCase):
             ],
             provider.calls,
         )
+
+    def test_propagates_provider_exceptions(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "provider unavailable",
+        ):
+            app.run_baseline_chatbot(
+                "Kiểm tra đơn hàng",
+                ExplodingProvider(),
+            )
 
 
 class BaselineSuiteTests(unittest.TestCase):
