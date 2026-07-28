@@ -71,5 +71,40 @@ class LoadTestCasesTests(unittest.TestCase):
                 app.load_test_cases(config_path)
 
 
+class FakeProvider:
+    def __init__(self):
+        self.calls = []
+
+    def generate(self, prompt, system_prompt=""):
+        self.calls.append(
+            {"prompt": prompt, "system_prompt": system_prompt}
+        )
+        return f"fake response: {prompt}"
+
+
+class BaselineChatbotTests(unittest.TestCase):
+    def test_calls_provider_once_without_tools_and_returns_response(self):
+        provider = FakeProvider()
+
+        response = app.run_baseline_chatbot(
+            "Đơn ORD-2001 đâu rồi?",
+            provider,
+        )
+
+        self.assertEqual(
+            "fake response: Đơn ORD-2001 đâu rồi?",
+            response,
+        )
+        self.assertEqual(
+            [
+                {
+                    "prompt": "Đơn ORD-2001 đâu rồi?",
+                    "system_prompt": app.CHATBOT_BASELINE_PROMPT,
+                }
+            ],
+            provider.calls,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
